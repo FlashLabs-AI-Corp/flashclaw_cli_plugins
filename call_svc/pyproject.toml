@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashclaw-cli-plugin-call-svc"
+version = "0.1.0"
+description = "Agent-friendly CLI for call-svc voice call number management."
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "requests>=2.28",
+]
+
+[project.scripts]
+flashclaw-cli-plugin-call-svc = "flashclaw_cli_plugin.call_svc.call_svc_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["flashclaw_cli_plugin.*"]
+
+[tool.setuptools.package-data]
+"flashclaw_cli_plugin.call_svc" = ["skills/*.md"]
