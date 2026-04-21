@@ -79,10 +79,10 @@ flashclaw-cli-plugin-flashrev-aiflow config set timeout 60
 
 Switch via `FLASHREV_AIFLOW_ENV` (default `prod`):
 
-| `FLASHREV_AIFLOW_ENV` | Gateway base URL                               |
-|-----------------------|------------------------------------------------|
-| `prod` (default)      | `https://open-ai-api.flashlabs.ai`             |
-| `test`                | `https://open-ai-api-test.eape.mobi`           |
+| `FLASHREV_AIFLOW_ENV` | Gateway                        |
+|-----------------------|--------------------------------|
+| `prod` (default)      | auth-gateway-svc production    |
+| `test`                | auth-gateway-svc test          |
 
 ```bash
 FLASHREV_AIFLOW_ENV=test flashclaw-cli-plugin-flashrev-aiflow --json health
