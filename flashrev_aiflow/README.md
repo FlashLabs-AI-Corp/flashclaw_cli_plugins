@@ -131,10 +131,36 @@ Supported keys: `base_url`, `timeout`, `discover_prefix`, `engage_prefix`, `mail
 | `aiflow resume FLOW_ID [--status TOKEN] [--required-tokens N] [--force]` | same endpoint + token pre-check                                |
 | `aiflow delete FLOW_ID [-y]`               | `GET /api/v1/ai/workflow/agent/delete/{flowId}`                           |
 | `aiflow rename FLOW_ID NEW_NAME`           | `POST /api/v1/ai/workflow/agent/update/name`                              |
-| `aiflow pitch FLOW_ID`                     | `GET /api/v1/ai/workflow/agent/get/pitch?flowId=...`                      |
+| `aiflow pitch show FLOW_ID`                | `GET /api/v1/ai/workflow/agent/get/pitch?flowId=...`                      |
+| `aiflow pitch init [--out PATH] [--force]` | Emit a local pitch.json scaffold (no network call; mirrors `examples/pitch.example.json`) |
 | `aiflow test-connection URL`               | `POST /api/v1/ai/workflow/agent/test/connection` (20s timeout)            |
 | `aiflow template`                          | `GET /api/v1/ai/workflow/agent/get/time/template`                         |
 | `aiflow create`                            | Interactive wizard; see "Create wizard" below                             |
+
+### 60-second dry-run with the shipped example files
+
+```bash
+# From the flashrev_aiflow/ directory:
+flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard --dry-run \
+  --csv ./examples/contacts.example.csv \
+  --pitch-file ./examples/pitch.example.json \
+  --country-column country
+```
+
+The example pitch JSON carries a top-level `url` field so `--website` is
+not required. See [`examples/README.md`](./examples/README.md) for more.
+
+### Author a pitch from scratch
+
+```bash
+flashclaw-cli-plugin-flashrev-aiflow aiflow pitch init --out ./my-pitch.json
+# edit ./my-pitch.json, then:
+flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard \
+  --csv ./contacts.csv \
+  --pitch-file ./my-pitch.json \
+  --country-column country \
+  --launch -y
+```
 
 ### Create wizard
 

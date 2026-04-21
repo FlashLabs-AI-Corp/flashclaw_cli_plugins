@@ -693,5 +693,112 @@ class TestCreateNoWizard(unittest.TestCase):
                       result.output)
 
 
+class TestPitchInit(unittest.TestCase):
+    """`aiflow pitch init` writes a valid pitch.json scaffold (no network)."""
+
+    def setUp(self):
+        from click.testing import CliRunner
+        from flashclaw_cli_plugin.flashrev_aiflow import flashrev_aiflow_cli
+
+        self.runner = CliRunner()
+        self.cli = flashrev_aiflow_cli.cli
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_init_writes_scaffold_with_all_required_sections(self):
+        out = Path(self.tmpdir) / "pitch.json"
+        result = self.runner.invoke(
+            self.cli,
+            ["aiflow", "pitch", "init", "--out", str(out)],
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(out.exists())
+        data = json.loads(out.read_text(encoding="utf-8"))
+        # 6 required pitch sections (per PitchStrategySection.vue) must be present.
+        for key in (
+            "officialDescription",
+            "painPoints",
+            "solutions",
+            "proofPoints",
+            "callToActions",
+            "leadMagnets",
+        ):
+            self.assertIn(key, data)
+        # Optional convenience fields that let --website be omitted.
+        self.assertIn("url", data)
+        self.assertIn("language", data)
+
+    def test_init_refuses_overwrite_without_force(self):
+        out = Path(self.tmpdir) / "pitch.json"
+        out.write_text("already here", encoding="utf-8")
+
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "pitch", "init", "--out", str(out)],
+            catch_exceptions=False,
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("PITCH_INIT_FILE_EXISTS", result.output)
+        # File must remain untouched.
+        self.assertEqual(out.read_text(encoding="utf-8"), "already here")
+
+    def test_init_overwrites_with_force(self):
+        out = Path(self.tmpdir) / "pitch.json"
+        out.write_text("stale", encoding="utf-8")
+
+        result = self.runner.invoke(
+            self.cli,
+            ["aiflow", "pitch", "init", "--out", str(out), "--force"],
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        data = json.loads(out.read_text(encoding="utf-8"))
+        self.assertIn("officialDescription", data)
+
+    def test_init_scaffold_validates_against_wizard_schema(self):
+        """The scaffold must pass wizard.validate_pitch_schema unchanged so
+        users can `aiflow pitch init` then hand the file straight to
+        `aiflow create --pitch-file` with zero edits if they only want a
+        smoke-test dry-run.
+        """
+        from flashclaw_cli_plugin.flashrev_aiflow.flashrev_aiflow_cli import (
+            _pitch_scaffold,
+        )
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+
+        scaffold = _pitch_scaffold()
+        validated = wizard.validate_pitch_schema(scaffold)
+        self.assertEqual(
+            validated["officialDescription"], scaffold["officialDescription"]
+        )
+        self.assertEqual(validated["painPoints"], scaffold["painPoints"])
+        # url should pass through (validate_pitch_schema retains it now).
+        self.assertEqual(validated.get("url"), "acme.com")
+
+
+class TestPitchShowBackwardCompat(unittest.TestCase):
+    """Ensure `aiflow pitch` is now a group that still exposes the old show path."""
+
+    def test_pitch_is_a_group_with_show_and_init(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import flashrev_aiflow_cli
+
+        pitch_group = flashrev_aiflow_cli.aiflow.commands["pitch"]
+        self.assertTrue(
+            hasattr(pitch_group, "commands"),
+            msg="aiflow pitch must be a group so that init + show can coexist",
+        )
+        self.assertIn("show", pitch_group.commands)
+        self.assertIn("init", pitch_group.commands)
+        # show still accepts a positional FLOW_ID.
+        show_cmd = pitch_group.commands["show"]
+        self.assertIn("flow_id", [p.name for p in show_cmd.params])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,9 +59,15 @@ commands:
   - name: aiflow rename
     description: Rename an AIFlow
     args: FLOW_ID NEW_NAME
-  - name: aiflow pitch
-    description: Show the 6-section pitch for an AIFlow
+  - name: aiflow pitch show
+    description: Show the 6-section pitch saved for an AIFlow
     args: FLOW_ID
+  - name: aiflow pitch init
+    description: Write a local pitch.json scaffold (6 sections + optional url/language) ready to edit and pass to `aiflow create --pitch-file`. No network call.
+    args: --out PATH --force
+    examples:
+      - aiflow pitch init --out ./pitch.json
+      - aiflow pitch init --out ./pitch.json --force
   - name: aiflow test-connection
     description: Test whether a company website URL is reachable for pitch generation
     args: URL

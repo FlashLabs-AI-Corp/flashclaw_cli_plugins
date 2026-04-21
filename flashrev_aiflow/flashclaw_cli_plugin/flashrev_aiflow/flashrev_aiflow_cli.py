@@ -412,10 +412,22 @@ def aiflow_rename(flow_id, new_name):
     emit(result)
 
 
-@aiflow.command("pitch")
+@aiflow.group("pitch")
+def aiflow_pitch():
+    """Pitch content for an AIFlow.
+
+    \b
+    Subcommands:
+      show FLOW_ID      Fetch the saved 6-section pitch for an AIFlow.
+      init [--out PATH] Emit a local pitch.json scaffold to edit + pass
+                        to `aiflow create --pitch-file`.
+    """
+
+
+@aiflow_pitch.command("show")
 @click.argument("flow_id")
-def aiflow_pitch(flow_id):
-    """Show the 6-section pitch for an AIFlow.
+def aiflow_pitch_show(flow_id):
+    """Show the 6-section pitch saved for a given AIFlow.
 
     Calls: GET /api/v1/ai/workflow/agent/get/pitch?flowId=...
     """
@@ -426,6 +438,80 @@ def aiflow_pitch(flow_id):
         code="AIFLOW_PITCH_FAILED",
     )
     emit(result)
+
+
+@aiflow_pitch.command("init")
+@click.option("--out", "out_path", default="pitch.json", show_default=True,
+              help="Output file path.")
+@click.option("--force", is_flag=True,
+              help="Overwrite the file if it already exists.")
+def aiflow_pitch_init(out_path, force):
+    """Emit a pitch.json scaffold (no network call).
+
+    Writes a ready-to-edit JSON file with the 6 required pitch sections
+    (officialDescription + painPoints / solutions / proofPoints /
+    callToActions / leadMagnets) plus optional url and language fields.
+
+    \b
+    Example:
+      flashclaw-cli-plugin-flashrev-aiflow aiflow pitch init --out ./my-pitch.json
+      # edit ./my-pitch.json
+      flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard \\
+          --csv ./contacts.csv --pitch-file ./my-pitch.json \\
+          --country-column country --dry-run
+    """
+    from pathlib import Path
+
+    path = Path(out_path).expanduser()
+    if path.exists() and not force:
+        emit_error(
+            f"Refusing to overwrite existing file: {path}. "
+            "Use --force to overwrite.",
+            code="PITCH_INIT_FILE_EXISTS",
+            details={"path": str(path.resolve())},
+        )
+    scaffold = _pitch_scaffold()
+    path.write_text(
+        json.dumps(scaffold, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    emit({
+        "ok": True,
+        "path": str(path.resolve()),
+        "sections": list(scaffold.keys()),
+    })
+
+
+def _pitch_scaffold() -> dict:
+    """Default pitch JSON scaffold. Kept in sync with examples/pitch.example.json."""
+    return {
+        "officialDescription": (
+            "One-sentence value proposition describing what your company does "
+            "and why it matters to buyers."
+        ),
+        "painPoints": [
+            "First specific pain your customers feel (keep each bullet short and concrete)",
+            "Second pain point",
+        ],
+        "solutions": [
+            "How your product solves the first pain",
+            "How it solves the second",
+        ],
+        "proofPoints": [
+            "Customer testimonial or case-study one-liner",
+            "Notable metric you have achieved (e.g. 30% lift, 2x ROI)",
+        ],
+        "callToActions": [
+            "Book a 15-minute demo",
+            "Download the one-page ROI brief",
+        ],
+        "leadMagnets": [
+            "Free audit of the prospect's current setup",
+            "Template / checklist / ROI calculator",
+        ],
+        "url": "acme.com",
+        "language": "en",
+    }
 
 
 @aiflow.command("test-connection")

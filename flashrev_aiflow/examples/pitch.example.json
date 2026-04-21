@@ -1,0 +1,25 @@
+{
+  "officialDescription": "One-sentence value proposition describing what your company does and why it matters to buyers.",
+  "painPoints": [
+    "First specific pain your customers feel (keep each bullet short and concrete)",
+    "Second pain point"
+  ],
+  "solutions": [
+    "How your product solves the first pain",
+    "How it solves the second"
+  ],
+  "proofPoints": [
+    "Customer testimonial or case-study one-liner",
+    "Notable metric you have achieved (e.g. 30% lift, 2x ROI)"
+  ],
+  "callToActions": [
+    "Book a 15-minute demo",
+    "Download the one-page ROI brief"
+  ],
+  "leadMagnets": [
+    "Free audit of the prospect's current setup",
+    "Template / checklist / ROI calculator"
+  ],
+  "url": "acme.com",
+  "language": "en"
+}
