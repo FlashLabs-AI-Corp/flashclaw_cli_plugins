@@ -8,15 +8,22 @@ CLI --[X-API-Key: sk_xxx]-> auth-gateway-svc --[Bearer + X-Auth-Company]-> Flash
 
 The CLI only sends an API Key; `companyId` / `userId` are extracted by the gateway and injected into the upstream request.
 
-Upstream services reached through the gateway:
+Every request goes to `auth-gateway-svc`. The gateway picks the right
+upstream based on path prefix; the CLI never talks to upstream services
+directly and does not need to know their URLs:
 
-| Service      | Where it lives            | Path pattern in requests |
-|--------------|---------------------------|--------------------------|
-| discover-api | `discover-api.flashintel.ai` (AIFlow CRUD, user info, pitch, templates) | `{discover_prefix}/api/v1/...`, `{discover_prefix}/api/v2/...` |
-| engage-api   | `engage-api.flashintel.ai` (mailbox pool, sequence)                     | `/engage/...` (prefix already in path) |
-| mailsvc      | `mail-api.flashintel.ai`  (bound mailbox listing)                       | `/mailsvc/...` (prefix already in path) |
+| Route prefix          | Path shape                | Kind of calls handled |
+|-----------------------|---------------------------|-----------------------|
+| `{discover_prefix}`   | `/api/v1/...`, `/api/v2/...` | User / company info, AIFlow CRUD, pitch, default time template |
+| `/engage`             | `/engage/...`             | Mailbox pool detail, sequence |
+| `/mailsvc`            | `/mailsvc/...`            | Bound mailbox listing |
 
-`discover-api` paths have no natural project prefix, so the CLI injects a configurable one (default `/flashrev`) to let `auth-gateway-svc` route the request. The value must match the `proxy.routes` entry configured in `auth-gateway-svc/config-*.yaml`.
+`discover_prefix` is configurable (default `/flashrev`) because the
+underlying paths start plainly with `/api/v*` and need a routing tag for
+the gateway. The value must match the `proxy.routes` entry configured in
+`auth-gateway-svc/config-*.yaml`. `/engage` and `/mailsvc` already carry
+their routing tag in the path, so the corresponding CLI config keys
+(`engage_prefix`, `mailsvc_prefix`) default to empty.
 
 ---
 

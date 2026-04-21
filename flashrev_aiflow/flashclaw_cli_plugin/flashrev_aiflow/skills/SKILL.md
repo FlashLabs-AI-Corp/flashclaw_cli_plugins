@@ -98,10 +98,11 @@ Request chain:
 CLI --[X-API-Key: sk_xxx]-> auth-gateway-svc --[Bearer+X-Auth-Company]-> FlashRev upstream
 ```
 
-Upstream services reached through the gateway:
-- `discover-api` — user info, AIFlow CRUD, pitch, templates
-- `engage-api`   — mailbox pool detail (paths begin with `/engage`)
-- `mailsvc`      — bound mailbox listing (paths begin with `/mailsvc`)
+The gateway dispatches by path prefix; the CLI does not know which upstream owns which prefix:
+
+- `{discover_prefix}` (default `/flashrev`) — user / company info, AIFlow CRUD, pitch, default time template
+- `/engage` — mailbox pool detail, sequence
+- `/mailsvc` — bound mailbox listing
 
 The API key (`FLASHREV_SVC_API_KEY`) is shared across all FlashRev skills that route through the same gateway.
 

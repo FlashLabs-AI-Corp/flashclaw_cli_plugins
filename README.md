@@ -1,92 +1,67 @@
-# flashclaw-cli-plugin-call-svc
+# flashclaw-cli-plugins
 
-Agent-friendly CLI harness for the **call-svc** voice call number management service, routed via **auth-gateway-svc**.
-
-```
-CLI --[X-API-Key: sk_xxx]-> auth-gateway-svc --[Bearer + X-Auth-Company]-> call-svc
-```
-
-The CLI only sends an API Key; `companyId` / `userId` are extracted by the gateway and injected into the upstream request.
-
-See [`call_svc/README.md`](call_svc/README.md) for full documentation.
-
----
-
-## Project layout
+Monorepo for the **flashclaw-cli-plugin-*** family of agent-friendly CLIs.
+Each plugin is an independently installable PyPI / ClawHub package that
+routes through **auth-gateway-svc**.
 
 ```
-call_svc/
-├── pyproject.toml
-├── README.md
-└── flashclaw_cli_plugin/
-    └── call_svc/
-        ├── call_svc_cli.py       # Click CLI entry point (+ REPL)
-        ├── core/
-        │   ├── client.py         # HTTP client, gateway routing
-        │   └── session.py        # API Key + config persistence
-        ├── utils/
-        │   ├── output.py         # JSON / human-readable output
-        │   └── repl_skin.py      # Interactive REPL skin
-        ├── skills/
-        │   └── SKILL.md          # AI-discoverable skill definition
-        └── tests/
-            ├── test_core.py      # Unit + subprocess tests
-            └── TEST.md           # Test plan & results
+CLI --[X-API-Key: sk_xxx]-> auth-gateway-svc --[Bearer + X-Auth-Company]-> upstream
 ```
 
----
+The CLI only sends an API key; `companyId` / `userId` are extracted by the
+gateway and injected into the upstream request. Plugins never call upstream
+services directly.
 
-## Install
+## Plugins
 
-End users (via ClawHub):
+| Module | PyPI name | Purpose |
+|---|---|---|
+| [`call_svc/`](call_svc/) | `flashclaw-cli-plugin-call-svc` | call-svc voice-call number lifecycle |
+| [`flashrev_aiflow/`](flashrev_aiflow/) | `flashclaw-cli-plugin-flashrev-aiflow` | FlashRev AIFlow email-outreach automation |
+
+Each plugin has its own `README.md`, `pyproject.toml`, `SKILL.md`, tests,
+and (where present) `CHANGELOG.md`.
+
+## Install (end users)
+
+Plugins install independently — pick whichever subset you need:
 
 ```bash
 npx clawhub install flashclaw-cli-plugin-call-svc
-flashclaw-cli-plugin-call-svc auth set-key sk_aBcDeFgH...
-flashclaw-cli-plugin-call-svc --json health
+npx clawhub install flashclaw-cli-plugin-flashrev-aiflow
 ```
 
-From source:
+See each module's README for its own config + first-run steps.
 
-```bash
-cd call_svc
-pip install -e .
+## Shared API key
+
+All plugins read the API key from the **`FLASHREV_SVC_API_KEY`** env var
+or `~/.claude/skills/<slug>-assistant/.env`. Setting the key once works
+across the family — no need to log in per plugin.
+
+## Package layout (namespace package)
+
+Plugins share the `flashclaw_cli_plugin.*` Python import prefix via
+**PEP 420 namespace packages**. Each plugin contributes one sub-package:
+
+```
+call_svc/flashclaw_cli_plugin/call_svc/                → from flashclaw_cli_plugin.call_svc import X
+flashrev_aiflow/flashclaw_cli_plugin/flashrev_aiflow/  → from flashclaw_cli_plugin.flashrev_aiflow import X
 ```
 
-See [`call_svc/README.md`](call_svc/README.md) for API Key provisioning, environment switching, and full command reference.
-
----
-
-## Commands at a glance
-
-| Group   | Commands                                  |
-|---------|-------------------------------------------|
-| `auth`  | `set-key`, `status`, `clear`              |
-| `config`| `show`, `set`                             |
-| `number`| `list`, `available`, `buy`                |
-| `call`  | `voice`                                   |
-| —       | `health`, `repl`                          |
-
-All commands accept `--json` for agent-friendly structured output.
-
----
+Rationale documented in
+[`call_svc/flashclaw_cli_plugin/NAMESPACE.md`](call_svc/flashclaw_cli_plugin/NAMESPACE.md) /
+[`flashrev_aiflow/flashclaw_cli_plugin/NAMESPACE.md`](flashrev_aiflow/flashclaw_cli_plugin/NAMESPACE.md).
 
 ## Development
 
 ```bash
-cd call_svc
-pip install -e .
-pytest flashclaw_cli_plugin/call_svc/tests/
+# Pick a plugin, install editable, run its tests
+cd call_svc && pip install -e . && pytest flashclaw_cli_plugin/call_svc/tests/
+cd flashrev_aiflow && pip install -e . && pytest flashclaw_cli_plugin/flashrev_aiflow/tests/
 ```
 
-### Publish to ClawHub
-
-```bash
-npx clawhub login
-
-npx clawhub publish ./call_svc \
-  --slug flashclaw-cli-plugin-call-svc \
-  --name "Call-Svc CLI" \
-  --version 0.1.0 \
-  --changelog "Initial release"
-```
+New plugins: copy the structure of an existing module, rename both the
+`<module>/` directory at the repo root and the inner
+`flashclaw_cli_plugin/<module>/` directory, then update `pyproject.toml`'s
+`name` / `[project.scripts]` / `[tool.setuptools.package-data]` entries.

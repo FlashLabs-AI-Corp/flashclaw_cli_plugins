@@ -3,16 +3,22 @@
 Request chain:
   CLI --[X-API-Key: sk_xxx]-> auth-gateway-svc --[Bearer + X-Auth-Company]-> upstream
 
-Upstream services:
-  discover-api.flashintel.ai  (FlashRev AIFlow / user / aiflow endpoints)
-  engage-api.flashintel.ai    (mailbox pool, sequence; paths start with /engage)
-  mailsvc / mail-api          (mailbox listing; paths start with /mailsvc)
+The CLI only talks to auth-gateway-svc. The gateway dispatches to the
+correct upstream service based on the path prefix:
+
+  {discover_prefix}   (default "/flashrev")    user/company, AIFlow CRUD, pitch, templates
+  /engage             (prefix already in path)  mailbox pool detail, sequence
+  /mailsvc            (prefix already in path)  bound mailbox listing
+
+Which upstream owns each prefix is configured on the gateway side
+(proxy.routes in auth-gateway-svc config); this client does not and
+does not need to know the upstream URLs.
 
 Only endpoints that have been verified against the frontend project
-(search-website) are wired up here. For endpoints that were requested by the
-PRD but do not yet exist in the frontend (Google Sheet import, blacklist CRUD,
-async pitch generation job, token-pricing), the CLI returns a clear error and
-points to the confirmation needed.
+(search-website) are wired up here. For endpoints that were requested
+by the PRD but not found in the frontend (Google Sheet import,
+blacklist CRUD, async pitch generation job, token-pricing), the CLI
+returns a clear error and points to the confirmation needed.
 """
 
 import requests
