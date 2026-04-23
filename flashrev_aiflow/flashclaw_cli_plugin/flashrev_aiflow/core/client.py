@@ -199,45 +199,66 @@ class FlashrevAiflowClient:
         )
 
     def list_aiflows(self, params: dict = None) -> dict:
-        """GET /api/v1/ai/workflow/agent/list — list AIFlows."""
+        """POST /api/v1/ai/workflow/type/rows — list AIFlows.
+
+        Backend writes to HttpServletResponse (stream); requests still
+        collects the full body before returning, so resp.json() or the
+        _handle fallback works.
+
+        Default body: {type: "All", viewType: "person"}.
+        Extra keys from *params* (e.g. type override) are merged in.
+        """
+        body = {"type": "All", "viewType": "person"}
+        if params:
+            body.update(params)
         return self._handle(
-            requests.get(
-                self._url_discover("/api/v1/ai/workflow/agent/list"),
-                params=params or None,
+            requests.post(
+                self._url_discover("/api/v1/ai/workflow/type/rows"),
+                json=body,
                 headers=self._headers(),
                 timeout=self.timeout,
             )
         )
 
-    def get_aiflow(self, flow_id: str) -> dict:
-        """GET /api/v1/ai/workflow/agent/get/flow/{flowId} — AIFlow detail."""
-        return self._handle(
-            requests.get(
-                self._url_discover(f"/api/v1/ai/workflow/agent/get/flow/{flow_id}"),
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-        )
+    def get_aiflow(self, flow_id) -> dict:
+        """GET /api/v1/ai/workflow/detail/nodes/{workflowId} — AIFlow detail.
 
-    def set_aiflow_status(self, flow_id: str, status: str) -> dict:
-        """GET /api/v1/ai/workflow/agent/sequence/status/{flowId}/{status}
-        Used for start / pause / resume. status is passed verbatim.
+        Returns a list of workflow nodes (each with id, name, sort,
+        openUrl, configuration JSON string, scenario).
         """
         return self._handle(
             requests.get(
-                self._url_discover(
-                    f"/api/v1/ai/workflow/agent/sequence/status/{flow_id}/{status}"
-                ),
+                self._url_discover(f"/api/v1/ai/workflow/detail/nodes/{flow_id}"),
                 headers=self._headers(),
                 timeout=self.timeout,
             )
         )
 
-    def delete_aiflow(self, flow_id: str) -> dict:
-        """GET /api/v1/ai/workflow/agent/delete/{flowId}."""
+    def set_aiflow_status(self, flow_id, status: str) -> dict:
+        """POST /api/v1/ai/workflow/status — change AIFlow status.
+
+        Body: {id: <Long>, status: "ACTIVE" | "PAUSED"}
+        Used for start / pause / resume on already-launched flows.
+        For the initial DRAFT -> ACTIVE transition use save_setting().
+        """
         return self._handle(
-            requests.get(
-                self._url_discover(f"/api/v1/ai/workflow/agent/delete/{flow_id}"),
+            requests.post(
+                self._url_discover("/api/v1/ai/workflow/status"),
+                json={"id": flow_id, "status": status},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        )
+
+    def delete_aiflow(self, flow_id) -> dict:
+        """POST /api/v1/ai/workflow/delete — delete a single AIFlow.
+
+        Body: {id: <Long>}
+        """
+        return self._handle(
+            requests.post(
+                self._url_discover("/api/v1/ai/workflow/delete"),
+                json={"id": flow_id},
                 headers=self._headers(),
                 timeout=self.timeout,
             )

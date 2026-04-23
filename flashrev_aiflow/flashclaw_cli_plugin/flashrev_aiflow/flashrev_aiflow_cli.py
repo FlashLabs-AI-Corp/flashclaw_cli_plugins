@@ -275,22 +275,15 @@ def aiflow():
 
 
 @aiflow.command("list")
-@click.option("--status", "status", default=None,
-              help="Filter by status (pass-through to backend).")
-@click.option("--page", default=None, type=int, help="Page number (1-indexed).")
-@click.option("--page-size", "page_size", default=None, type=int,
-              help="Results per page.")
-def aiflow_list(status, page, page_size):
-    """List AIFlows (GET /api/v1/ai/workflow/agent/list)."""
+@click.option("--type", "flow_type", default="All", show_default=True,
+              help="Workflow type filter (default All).")
+@click.option("--view", "view_type", default="person", show_default=True,
+              help="View type (default person).")
+def aiflow_list(flow_type, view_type):
+    """List AIFlows (POST /api/v1/ai/workflow/type/rows)."""
     _require_api_key()
     client = _build_client()
-    params = {}
-    if status:
-        params["status"] = status
-    if page is not None:
-        params["page"] = page
-    if page_size is not None:
-        params["pageSize"] = page_size
+    params = {"type": flow_type, "viewType": view_type}
     result = _safe_call(lambda: client.list_aiflows(params), code="AIFLOW_LIST_FAILED")
     emit(result)
 
@@ -298,7 +291,7 @@ def aiflow_list(status, page, page_size):
 @aiflow.command("show")
 @click.argument("flow_id")
 def aiflow_show(flow_id):
-    """Show a single AIFlow (GET /api/v1/ai/workflow/agent/get/flow/{id})."""
+    """Show AIFlow detail nodes (GET /api/v1/ai/workflow/detail/nodes/{id})."""
     _require_api_key()
     client = _build_client()
     result = _safe_call(lambda: client.get_aiflow(flow_id), code="AIFLOW_SHOW_FAILED")
@@ -308,19 +301,20 @@ def aiflow_show(flow_id):
 @aiflow.command("start")
 @click.argument("flow_id")
 @click.option("--status", "status_value", default="ACTIVE", show_default=True,
-              help="Status token sent to /sequence/status/{id}/{status}. "
-                   "Frontend uses ACTIVE for launch/resume (see "
-                   "search-website/src/views/ai-flow/components/columns/"
-                   "ai-status-cell.vue).")
+              help="Status value sent to POST /status. "
+                   "Frontend uses ACTIVE for start/resume, PAUSED for pause.")
 @click.option("--required-tokens", type=int, default=None,
               help="Required token budget; exit 2 if balance is below this.")
 @click.option("--force", is_flag=True,
               help="Skip CLI-side token balance check "
                    "(backend / gateway enforcement still applies).")
 def aiflow_start(flow_id, status_value, required_tokens, force):
-    """Start / launch an AIFlow.
+    """Start / resume an already-launched AIFlow.
 
-    Calls: GET /api/v1/ai/workflow/agent/sequence/status/{flowId}/{status}
+    Calls: POST /api/v1/ai/workflow/status  body: {id, status: "ACTIVE"}
+
+    For the initial DRAFT -> ACTIVE transition, use `aiflow create --launch`
+    which goes through save/setting instead.
 
     Token pre-check: reads data.limit.{tokenTotal,tokenCost} from
     GET /api/v2/oauth/me and blocks if the balance is exhausted (or below
@@ -339,10 +333,12 @@ def aiflow_start(flow_id, status_value, required_tokens, force):
 @aiflow.command("pause")
 @click.argument("flow_id")
 @click.option("--status", "status_value", default="PAUSED", show_default=True,
-              help="Status token sent to /sequence/status/{id}/{status}. "
-                   "Frontend uses PAUSED (flow-header.vue:120).")
+              help="Status value sent to POST /status.")
 def aiflow_pause(flow_id, status_value):
-    """Pause an AIFlow."""
+    """Pause an AIFlow.
+
+    Calls: POST /api/v1/ai/workflow/status  body: {id, status: "PAUSED"}
+    """
     _require_api_key()
     client = _build_client()
     result = _safe_call(
@@ -355,8 +351,7 @@ def aiflow_pause(flow_id, status_value):
 @aiflow.command("resume")
 @click.argument("flow_id")
 @click.option("--status", "status_value", default="ACTIVE", show_default=True,
-              help="Status token sent to /sequence/status/{id}/{status}. "
-                   "Frontend uses ACTIVE to resume (same as launch).")
+              help="Status value sent to POST /status.")
 @click.option("--required-tokens", type=int, default=None,
               help="Required token budget; exit 2 if balance is below this.")
 @click.option("--force", is_flag=True,
@@ -364,6 +359,7 @@ def aiflow_pause(flow_id, status_value):
 def aiflow_resume(flow_id, status_value, required_tokens, force):
     """Resume a paused AIFlow.
 
+    Calls: POST /api/v1/ai/workflow/status  body: {id, status: "ACTIVE"}
     Token pre-check applies (same contract as `aiflow start`).
     """
     _require_api_key()
@@ -380,7 +376,7 @@ def aiflow_resume(flow_id, status_value, required_tokens, force):
 @click.argument("flow_id")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt.")
 def aiflow_delete(flow_id, yes):
-    """Delete an AIFlow (GET /api/v1/ai/workflow/agent/delete/{id})."""
+    """Delete an AIFlow (POST /api/v1/ai/workflow/delete  body: {id})."""
     _require_api_key()
     if not yes:
         click.confirm(f"Delete AIFlow '{flow_id}'?", abort=True)
