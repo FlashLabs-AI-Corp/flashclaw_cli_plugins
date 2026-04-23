@@ -350,24 +350,59 @@ def filter_active_mailboxes(mailboxes_response: dict) -> list[dict]:
     """Extract mailbox items from the mailsvc response and keep Active only.
 
     The mailsvc response shape is typically:
-        { code: 200, data: [ {id, address, status, warmUp, ...}, ... ] }
+        { code: 200, data: [ {id, address, status, mailAddressEnum, ...}, ... ] }
     Tolerates data being either a list or {items: [...]}.
+
+    Status representations seen in the wild:
+      * int ``status == 1`` means active (mailsvc convention on test + prod)
+      * string ``"ACTIVE"`` / ``"ENABLED"``
+      * string ``mailAddressEnum == "SUCCESS"`` — mailsvc health flag
+      * absent — treated as active (conservative: avoids silently dropping
+        items when a new backend schema adds a field we do not yet know)
     """
     data = (mailboxes_response or {}).get("data")
     items = data if isinstance(data, list) else (data or {}).get("items", [])
+
+    active_string_values = {"ACTIVE", "ENABLED", "SUCCESS"}
     actives = []
     for item in items or []:
-        st = (item.get("status") or item.get("state") or "").upper()
-        if st in ("", "ACTIVE", "ENABLED"):
+        raw_status = item.get("status")
+        raw_enum = item.get("mailAddressEnum") or item.get("state")
+
+        is_active = False
+        # bool is a subclass of int in Python; exclude it so True/False don't
+        # accidentally satisfy the int branch.
+        if isinstance(raw_status, int) and not isinstance(raw_status, bool):
+            is_active = raw_status == 1
+        elif isinstance(raw_status, str) \
+                and raw_status.upper() in active_string_values:
+            is_active = True
+
+        if not is_active and isinstance(raw_enum, str) \
+                and raw_enum.upper() in active_string_values:
+            is_active = True
+
+        # No recognised signal at all -> include (conservative default).
+        if raw_status is None and raw_enum is None:
+            is_active = True
+
+        if is_active:
             actives.append(item)
     return actives
 
 
-def mailbox_id(mailbox: dict) -> Optional[str]:
-    """Pick the id field of a mailbox record (frontend uses 'addressId'/'id')."""
+def mailbox_id(mailbox: dict):
+    """Return the id field of a mailbox record, preserving its native type.
+
+    mailsvc returns ``id`` as an int (e.g. 1479). Do NOT str-convert: the
+    downstream save/email/config endpoint expects ``addressId`` as a JSON
+    number, matching what the frontend sends (search-website
+    src/views/ai-sdr/settings.vue:318-320 reads ``item.id`` raw).
+    """
     for k in ("addressId", "id", "mailAddressId", "mailboxId"):
-        if mailbox.get(k):
-            return str(mailbox[k])
+        v = mailbox.get(k)
+        if v is not None:
+            return v
     return None
 
 
