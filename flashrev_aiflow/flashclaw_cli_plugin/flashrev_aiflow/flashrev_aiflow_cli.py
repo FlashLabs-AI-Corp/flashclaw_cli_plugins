@@ -936,21 +936,81 @@ def _run_create_wizard(
     new_props = dict(props)
     new_props["sequenceMailboxList"] = sequence_list
 
+    # Decide whether to launch BEFORE writing, because launch vs draft
+    # uses two different backend endpoints that are NOT interchangeable:
+    #   save/email/config          — draft-only, flow stays DRAFT
+    #   save/setting (the real launch path used by the frontend's
+    #                "Launch AIFlow" button at settings.vue:358)
+    #                — persists settings AND transitions DRAFT -> ACTIVE
+    # Hitting save/email/config first then /sequence/status/.../ACTIVE
+    # returns 200 but data:false (state machine refuses the transition);
+    # save/setting is the only working launch path from DRAFT.
+    if launch_now is None:
+        if interactive:
+            launch_now = click.confirm(
+                "Launch this AIFlow now? (No = save as draft)", default=True
+            )
+        else:
+            # Non-wizard default: save as draft unless --launch was explicit.
+            launch_now = False
+
+    if launch_now and interactive and not yes and not dry_run:
+        click.confirm("Proceed with launch?", abort=True, default=True)
+
+    if launch_now and not dry_run:
+        _check_token_balance(client, required=None, force=force)
+
+    # /save/setting requires a populated ``timeTemplateConfig`` or the
+    # backend replies ``400 Unknown error``. Fresh draft flows have
+    # ``timeTemplateConfig: null``, so on the launch branch we fetch
+    # the account's template library and embed one + its id. Draft
+    # saves (/save/email/config) don't have this constraint.
+    if launch_now and not dry_run:
+        template = wizard.pick_default_time_template(client)
+        if template is None:
+            emit_error(
+                "No time-template available on the account — cannot populate "
+                "timeTemplateConfig for launch. Create one in the web UI first, "
+                "or launch with --no-launch and configure settings there.",
+                code="AIFLOW_LAUNCH_NO_TIME_TEMPLATE",
+            )
+        new_props["timeTemplateConfig"] = wizard.build_time_template_config(template)
+        new_props["timeTemplateId"] = template.get("id")
+        click.echo(
+            f"  Time template      : {template.get('name', '')[:60]}"
+            f" (id={template.get('id')})"
+        )
+
     save_body = {
         "workflowId": flow_id,
         "properties": new_props,
         "autoApprove": bool(auto_approve),
     }
+
+    launch_result = None
     if dry_run:
-        click.echo(
-            "  [dry-run] would POST /api/v1/ai/workflow/agent/save/email/config"
+        if launch_now:
+            click.echo(
+                "  [dry-run] would POST /api/v1/ai/workflow/save/setting "
+                "(launch: persists settings AND transitions DRAFT -> ACTIVE)"
+            )
+        else:
+            click.echo(
+                "  [dry-run] would POST /api/v1/ai/workflow/agent/save/email/config "
+                "(draft: persists settings, flow stays DRAFT)"
+            )
+    elif launch_now:
+        launch_result = _safe_call(
+            lambda: client.save_setting(save_body),
+            code="AIFLOW_LAUNCH_FAILED",
         )
+        click.echo("  Settings saved + flow launched.")
     else:
         _safe_call(
             lambda: client.save_email_config(save_body),
             code="EMAIL_CONFIG_SAVE_FAILED",
         )
-        click.echo("  Settings saved.")
+        click.echo("  Settings saved (flow remains DRAFT).")
 
     # ── Summary ─────────────────────────────────────────────
     click.echo()
@@ -974,6 +1034,7 @@ def _run_create_wizard(
         "emailRounds": email_rounds,
         "mailboxesSelected": len(sequence_list),
         "autoApprove": bool(auto_approve),
+        "launched": bool(launch_now) and not dry_run,
     }
     if balance is not None:
         summary["tokenRemaining"] = balance["tokenRemaining"]
@@ -988,33 +1049,15 @@ def _run_create_wizard(
         )
         return
 
-    # ── Launch branch ───────────────────────────────────────
-    if launch_now is None:
-        if interactive:
-            launch_now = click.confirm(
-                "Launch this AIFlow now? (No = save as draft)", default=True
-            )
-        else:
-            # Non-wizard default: save as draft unless --launch was explicit.
-            launch_now = False
-
-    if not launch_now:
+    if launch_now:
+        click.secho(f"Launched: {flow_id}", fg="green")
+        if launch_result is not None:
+            emit(launch_result)
+    else:
         click.echo("Saved as draft. Launch later with:")
         click.echo(
             f"  flashclaw-cli-plugin-flashrev-aiflow aiflow start {flow_id}"
         )
-        return
-
-    if interactive and not yes:
-        click.confirm("Proceed with launch?", abort=True, default=True)
-
-    _check_token_balance(client, required=None, force=force)
-    launch = _safe_call(
-        lambda: client.set_aiflow_status(flow_id, "ACTIVE"),
-        code="AIFLOW_LAUNCH_FAILED",
-    )
-    click.secho(f"Launched: {flow_id}", fg="green")
-    emit(launch)
 
 
 def _short_repr(obj) -> str:

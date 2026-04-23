@@ -382,6 +382,31 @@ class TestWizardHelpers(unittest.TestCase):
         self.assertIn("m3", ids)
         self.assertNotIn("m2", ids)
 
+    def test_filter_active_mailboxes_handles_int_status(self):
+        """mailsvc test-env returns status as an int (1=active, 0=inactive).
+        Regression guard for the 2026-04-23 wire-up crash where .upper()
+        was called on an int and blew up the create wizard."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+
+        resp = {
+            "code": 200,
+            "data": [
+                {"id": 1, "status": 1, "mailAddressEnum": "SUCCESS"},
+                {"id": 2, "status": 0, "mailAddressEnum": "FAILED"},
+            ],
+        }
+        actives = wizard.filter_active_mailboxes(resp)
+        self.assertEqual([m["id"] for m in actives], [1])
+
+    def test_filter_active_mailboxes_uses_mailAddressEnum_fallback(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+
+        resp = {"code": 200, "data": [
+            {"id": 7, "mailAddressEnum": "SUCCESS"},  # no status at all
+        ]}
+        actives = wizard.filter_active_mailboxes(resp)
+        self.assertEqual([m["id"] for m in actives], [7])
+
     def test_mailbox_id_picks_address_id_first(self):
         from flashclaw_cli_plugin.flashrev_aiflow import wizard
 
@@ -390,6 +415,16 @@ class TestWizardHelpers(unittest.TestCase):
         )
         self.assertEqual(wizard.mailbox_id({"id": "B"}), "B")
         self.assertIsNone(wizard.mailbox_id({}))
+
+    def test_mailbox_id_preserves_int_type(self):
+        """save/email/config expects addressId as a JSON number, not string.
+        Regression guard: mailbox_id MUST NOT str-convert the value."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+
+        result = wizard.mailbox_id({"id": 1479})
+        self.assertEqual(result, 1479)
+        self.assertIsInstance(result, int)
+        self.assertNotIsInstance(result, str)
 
 
 class TestNewClientEndpoints(unittest.TestCase):
