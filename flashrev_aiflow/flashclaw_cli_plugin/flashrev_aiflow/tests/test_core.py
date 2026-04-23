@@ -110,10 +110,10 @@ class TestClientUrlBuilding(unittest.TestCase):
         self.client.mailsvc_prefix = ""
 
     def test_discover_url_prepends_prefix(self):
-        url = self.client._url_discover("/api/v1/ai/workflow/agent/list")
+        url = self.client._url_discover("/api/v1/ai/workflow/type/rows")
         self.assertEqual(
             url,
-            "https://gateway.example.com/flashrev/api/v1/ai/workflow/agent/list",
+            "https://gateway.example.com/flashrev/api/v1/ai/workflow/type/rows",
         )
 
     def test_engage_url_keeps_native_prefix(self):
@@ -157,17 +157,17 @@ class TestClientEndpoints(unittest.TestCase):
         r.content = json.dumps(payload).encode()
         return r
 
-    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.get")
-    def test_list_aiflows_calls_expected_url(self, mock_get):
-        mock_get.return_value = self._mock_response({"code": 200, "data": []})
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
+    def test_list_aiflows_posts_to_type_rows(self, mock_post):
+        mock_post.return_value = self._mock_response({"code": 200, "data": []})
 
-        self.client.list_aiflows({"status": "running"})
+        self.client.list_aiflows({"type": "All", "viewType": "person"})
 
-        called_url = mock_get.call_args[0][0]
-        self.assertIn("/flashrev/api/v1/ai/workflow/agent/list", called_url)
-        self.assertEqual(
-            mock_get.call_args[1]["params"], {"status": "running"}
-        )
+        called_url = mock_post.call_args[0][0]
+        self.assertIn("/flashrev/api/v1/ai/workflow/type/rows", called_url)
+        body = mock_post.call_args[1]["json"]
+        self.assertEqual(body["type"], "All")
+        self.assertEqual(body["viewType"], "person")
 
     @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.get")
     def test_whoami_hits_me_endpoint(self, mock_get):
