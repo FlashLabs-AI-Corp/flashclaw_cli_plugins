@@ -316,6 +316,23 @@ class FlashrevAiflowClient:
             )
         )
 
+    def list_time_templates(self, params: dict = None) -> dict:
+        """GET /engage/api/v1/time/template/list — list available send-time templates.
+
+        The save/setting endpoint requires a non-null ``timeTemplateConfig``
+        (``get_time_template`` returns empty for fresh draft flows), so the
+        wizard picks a template from this listing when launching. Each item
+        in ``data`` has ``{id, name, properties, timeBlocks, busSource}``.
+        """
+        return self._handle(
+            requests.get(
+                self._url_engage("/engage/api/v1/time/template/list"),
+                params=params or None,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        )
+
     # ═══════════════════════════════════════════════════════════
     # Mailbox binding (discover-api)
     # ═══════════════════════════════════════════════════════════
@@ -360,6 +377,11 @@ class FlashrevAiflowClient:
     def save_email_config(self, payload: dict) -> dict:
         """POST /api/v1/ai/workflow/agent/save/email/config
 
+        Persists email-setting config while leaving the flow in DRAFT.
+        Use this for `aiflow create --no-launch`. For launch-on-create,
+        use :meth:`save_setting` instead — save_email_config alone does
+        NOT transition the flow to ACTIVE.
+
         Body shape (from search-website/src/views/ai-sdr/settings.vue:324):
             {
               workflowId,
@@ -373,6 +395,43 @@ class FlashrevAiflowClient:
         return self._handle(
             requests.post(
                 self._url_discover("/api/v1/ai/workflow/agent/save/email/config"),
+                json=payload,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        )
+
+    def save_setting(self, payload: dict) -> dict:
+        """POST /api/v1/ai/workflow/save/setting  (note: no /agent/ segment)
+
+        Launch-the-flow endpoint. This is what the frontend's
+        "Launch AIFlow" button on /flow/steps/settings hits
+        (search-website/src/views/ai-sdr/settings.vue:358 calling
+        ai-sdr/index.ts::saveSetting at line 290-297).
+
+        Distinguishes itself from :meth:`save_email_config` in two ways:
+            1. Different URL path -- /save/setting, NOT /agent/save/email/config.
+            2. Side effect -- both persists the settings body AND transitions
+               the flow from DRAFT to ACTIVE.
+
+        An attempt to launch via GET /sequence/status/{flowId}/ACTIVE
+        returns ``{code:200, data:false}`` and does not actually flip the
+        state machine; this endpoint is the real launch path.
+
+        Body shape is the same as save_email_config's, optionally plus
+        AI-reply fields when enabled:
+            {
+              workflowId,
+              properties: { timeTemplateConfig, emailTrack,
+                            sequenceMailboxList, timeTemplateId, ... },
+              autoApprove,
+              # optional (only when isShowAiReply is on in the frontend):
+              agentPromptList, enableAgentReply, agentStrategy
+            }
+        """
+        return self._handle(
+            requests.post(
+                self._url_discover("/api/v1/ai/workflow/save/setting"),
                 json=payload,
                 headers=self._headers(),
                 timeout=self.timeout,

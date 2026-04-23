@@ -391,6 +391,50 @@ def filter_active_mailboxes(mailboxes_response: dict) -> list[dict]:
     return actives
 
 
+def pick_default_time_template(client) -> Optional[dict]:
+    """Fetch /engage/api/v1/time/template/list and pick a usable template.
+
+    The save/setting (launch) endpoint rejects requests whose
+    ``properties.timeTemplateConfig`` is null or empty with ``400 Unknown
+    error``. For a fresh draft flow, ``get_email_config`` returns
+    ``timeTemplateConfig: null``, so on launch we fetch the account's
+    template library and embed one.
+
+    Preference order:
+      1. Entries tagged ``busSource == 'ai_workflow'`` (what the web wizard
+         saves templates as).
+      2. Any template.
+      3. None if the account has none -- caller must fall back to a
+         hard-coded minimal template or surface an error.
+    """
+    try:
+        resp = client.list_time_templates()
+    except Exception:  # noqa: BLE001
+        return None
+    items = (resp or {}).get("data") or []
+    for t in items:
+        if t.get("busSource") == "ai_workflow":
+            return t
+    return items[0] if items else None
+
+
+def build_time_template_config(template: dict) -> dict:
+    """Shape a time-template record into the ``timeTemplateConfig`` key
+    expected inside ``save_setting``'s ``properties`` payload.
+
+    Matches the subset the frontend sends from
+    search-website/src/views/ai-sdr/settings.vue:324-340 -- ``name``,
+    ``properties``, ``timeBlocks``. Ignores the outer ``id`` / ``busSource``
+    fields (those aren't part of the nested config; ``id`` is passed
+    separately as the sibling ``timeTemplateId`` key).
+    """
+    return {
+        "name": template.get("name", ""),
+        "properties": template.get("properties") or {},
+        "timeBlocks": template.get("timeBlocks") or [],
+    }
+
+
 def mailbox_id(mailbox: dict):
     """Return the id field of a mailbox record, preserving its native type.
 
