@@ -495,3 +495,475 @@ def select_mailboxes_interactively(
         for mb in selected
         if mailbox_id(mb) is not None
     ]
+
+
+# ═══════════════════════════════════════════════════════════
+# V2 pitch flow — test/connection -> save/pitch
+# ═══════════════════════════════════════════════════════════
+
+def build_save_pitch_body(
+    workflow_id,
+    test_connection_data: dict,
+    url: str,
+    language: str,
+) -> dict:
+    """Shape the payload for ``POST /save/pitch`` from a ``test/connection``
+    response.
+
+    Mirrors search-website/src/views/ai-sdr/pitch.vue:490-499:
+      - spreads the ICP DTO returned by test/connection (officialDescription,
+        painPoints, solutions, proofPoints, callToActions, leadMagnets,
+        benchmarkBrands, ...)
+      - injects workflowId, url (prefixed with https:// if missing), and
+        language from the wizard context
+      - sets useConfigLanguage=True when language == 'auto' so the backend
+        per-contact language detection kicks in
+      - leaves all other ICP fields untouched (backend persists as-is; see
+        dubbo-api-svc AiWorkFlowServiceImpl.savePitch ~line 1115)
+    """
+    body = dict(test_connection_data or {})
+    normalised_url = url if url.startswith("http") else "https://" + url.lstrip("/")
+    body["workflowId"] = workflow_id
+    body["url"] = normalised_url
+    body["language"] = language
+    body["useConfigLanguage"] = (language == "auto")
+    return body
+
+
+# ═══════════════════════════════════════════════════════════
+# V2 prompt flow — get/workflow/prompt -> [regenerate] -> save/prompt
+# ═══════════════════════════════════════════════════════════
+
+# Default step cadence used when the backend's /get/prompt response doesn't
+# carry delayMinutes (mirrors the 3-step default the frontend seeds in
+# search-website/src/views/ai-sdr/workflow.vue:383-389).
+_DEFAULT_DELAY_MINUTES = [60, 4320, 10080]  # 1h, 3d, 7d
+
+
+def extract_prompt_steps(get_prompt_response: dict) -> list[dict]:
+    """Normalise the `/get/prompt` response into a flat list of step dicts.
+
+    The endpoint returns one of two shapes depending on backend version:
+      A) ``{"code":200, "data":[{step,...}, ...]}``
+      B) a bare list ``[{step,...}, ...]``
+    We accept both and return the inner list, sorted by ``step``.
+    """
+    if isinstance(get_prompt_response, list):
+        steps = get_prompt_response
+    else:
+        steps = (get_prompt_response or {}).get("data") or []
+        if not isinstance(steps, list):
+            steps = []
+    return sorted(steps, key=lambda s: s.get("step") or 0)
+
+
+def prompt_step_is_complete(step: dict) -> bool:
+    """A step is "complete" when its ``emailContent`` (the LLM prompt
+    template) is non-empty. The scheduler generates per-contact emails at
+    send time by feeding ``emailContent`` + contact data into the AI
+    service; as long as this template is present, the step can produce
+    emails even if ``emailSubject`` / ``subject`` / ``content`` stay empty
+    (mirrors the frontend sample save/prompt body which ships step 1/3
+    with all those fields blank but step 2 with a full emailContent).
+    """
+    return bool((step.get("emailContent") or "").strip())
+
+
+def count_incomplete_prompts(steps: list[dict]) -> int:
+    """How many steps still need LLM generation before launch is safe."""
+    return sum(1 for s in steps if not prompt_step_is_complete(s))
+
+
+def build_save_prompt_body(
+    workflow_id,
+    steps: list[dict],
+) -> dict:
+    """Shape ``/save/prompt`` body from a steps list (as produced by
+    :func:`extract_prompt_steps`, possibly after regeneration).
+
+    Backend requires ``workflowStepId`` on every prompt (dubbo-api-svc
+    AiWorkFlowServiceImpl line 1570-1572) — if any step is missing it we
+    raise :class:`click.UsageError` rather than silently sending garbage.
+
+    ``delayMinutes`` is taken from the step if present, otherwise the Nth
+    entry of :data:`_DEFAULT_DELAY_MINUTES` (1h / 3d / 7d).
+    """
+    prompts = []
+    for i, s in enumerate(steps):
+        step_id = s.get("workflowStepId") or s.get("id")
+        if step_id is None:
+            raise click.UsageError(
+                f"step {s.get('step') or i+1} has no workflowStepId; the "
+                "wizard must call /get/prompt first to seed default rows."
+            )
+        delay = s.get("delayMinutes")
+        if delay is None:
+            delay = _DEFAULT_DELAY_MINUTES[i] if i < len(_DEFAULT_DELAY_MINUTES) else 10080
+        prompts.append({
+            "workflowStepId": step_id,
+            "step": s.get("step") or (i + 1),
+            "stepType": s.get("stepType") or "email",
+            "delayMinutes": delay,
+            "emailSubject": s.get("emailSubject") or "",
+            "emailContent": s.get("emailContent") or "",
+            "subject": s.get("subject") or s.get("exampleSubject") or "",
+            "content": s.get("content") or s.get("exampleContent") or "",
+        })
+    return {"workflowId": workflow_id, "prompts": prompts}
+
+
+def _parse_sse_content(raw: str) -> str:
+    """Concatenate ``data`` fields of ``type=content`` events from an SSE stream.
+
+    Handles the Server-Sent Events shape that
+    ``/api/v1/ai/workflow/get/email/prompt`` returns: one JSON event per
+    line, each like ``{"type":"content","data":"...chunk..."}``. Events
+    whose ``type`` is not ``content`` (done / error / etc.) are skipped.
+    Malformed lines are silently ignored so a stray keepalive comment
+    doesn't kill the whole parse.
+
+    The backend emits ``</content>`` as a stream terminator (wrapped in
+    its own content event) — it is stripped from the result so callers
+    get the clean prompt template.
+    """
+    out = []
+    for line in (raw or "").split("\n"):
+        line = line.strip()
+        if not line or line.startswith(":"):
+            continue
+        # The server emits bare JSON per line — no ``data: `` SSE prefix —
+        # but strip one if present just in case.
+        if line.startswith("data:"):
+            line = line[len("data:"):].strip()
+        try:
+            import json
+            ev = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if ev.get("type") == "content":
+            out.append(ev.get("data", ""))
+    text = "".join(out)
+    # Strip the backend's stream terminator if it leaked through.
+    for terminator in ("</content>", "<content>"):
+        if text.endswith(terminator):
+            text = text[: -len(terminator)]
+    return text
+
+
+# Default delay cadence mirrored from search-website/src/views/ai-sdr/workflow.vue:
+# 3 steps at 1h / 3d / 7d. Used when /get/prompt returns an empty list —
+# the CLI seeds three skeleton rows so /save/prompt has something to
+# anchor on, and so the launch-time completeness check has something to
+# report against.
+_SEED_DEFAULT_STEPS = [
+    {"step": 1, "stepType": "Email", "delayMinutes": 60},
+    {"step": 2, "stepType": "Email", "delayMinutes": 4320},
+    {"step": 3, "stepType": "Email", "delayMinutes": 10080},
+]
+
+
+def seed_default_steps(client, workflow_id) -> list[dict]:
+    """Seed 3 skeleton step rows in ``t_ai_workflow_prompt`` for a flow that
+    has none.
+
+    Backend ``/get/prompt`` returns an empty list for freshly-created flows
+    whose type does not auto-generate default prompts (e.g. ENROLL). The
+    frontend handles this by defaulting to a 3-step pipeline (1h / 3d / 7d)
+    in the UI and sending a ``/save/prompt`` request with empty content —
+    the backend accepts rows without ``workflowStepId`` (it auto-generates
+    PKs for new rows) so this is a supported path.
+
+    After save, the method re-queries ``/get/prompt`` to fetch the newly
+    assigned workflowStepIds and returns the resulting steps list,
+    ready for a subsequent regenerate pass.
+    """
+    prompts = [
+        {
+            **skel,
+            "emailSubject": "",
+            "emailContent": "",
+            "subject": "",
+            "content": "",
+        }
+        for skel in _SEED_DEFAULT_STEPS
+    ]
+    client.save_prompt(workflow_id, prompts)
+    # Re-query so we have the new step IDs for the regenerate pass.
+    return extract_prompt_steps(client.get_workflow_prompt(workflow_id))
+
+
+def regenerate_step_content(
+    client,
+    workflow_id,
+    steps: list[dict],
+    timeout: int = 120,
+) -> list[dict]:
+    """Per-step LLM fill (``--regenerate-emails``): parse SSE from
+    ``/get/email/prompt`` into ``emailContent``.
+
+    For each step:
+      POST /get/email/prompt with beforStep carrying the prior steps'
+      ``emailSubject`` / ``emailContent`` history (mirrors
+      search-website/src/views/ai-sdr/components/typing-effect.vue:211-218).
+
+    The response is a text/event-stream: one JSON event per line. Events
+    of ``type=content`` are concatenated into the final ``emailContent``
+    prompt template. That template is what the scheduler later feeds
+    (together with per-contact data) into the AI service to produce the
+    actual email at send time.
+
+    ``/get/email`` (the sample subject+content preview) is intentionally
+    NOT called here — the upstream ai-sdr service routinely exceeds the
+    Cloudflare 90s edge timeout and returns HTML 504 responses, which
+    breaks --regenerate-emails for the whole run. The sample fields
+    (``subject`` / ``content``) are left blank; the frontend's own launch
+    flow ships them blank too for step 1 / step 3 of the default 3-step
+    pipeline, so this is consistent with the web UI behaviour.
+
+    IMPORTANT: this call **deliberately omits ``workflowStepId``** from
+    the request body. Dubbo's ``/get/email/prompt`` short-circuits when
+    ``workflowStepId`` is provided AND the row already exists — it
+    returns the saved ``emailContent`` verbatim (even if empty), skipping
+    the LLM path. Since regenerate is meant to *replace* empty seed rows
+    with fresh LLM content, we must force the generation path by leaving
+    the step id out. The id is still kept on the step dict internally so
+    the subsequent ``/save/prompt`` can UPDATE the correct row.
+
+    Mutates copies of the step dicts; returns the updated list. Per-step
+    failures are logged to stderr and that step's emailContent is left
+    as-is (empty if fresh seed), so one flaky step doesn't abort the pass.
+    """
+    import time
+    import requests as _requests
+
+    url = client._url_discover("/api/v1/ai/workflow/get/email/prompt")
+    max_attempts = 3
+    updated = []
+    before_step = []
+    for s in steps:
+        new_s = dict(s)
+        step_label = new_s.get("step") or (len(updated) + 1)
+
+        # Retry transient upstream failures (502/503/504, connection errors).
+        # The ai-sdr-svc + Cloudflare edge chain is flaky on test env; one
+        # retry per step catches the common intermittent failures without
+        # ballooning runtime.
+        last_err = None
+        prompt_text = ""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # NB: no ``workflowStepId`` — see docstring "IMPORTANT" note.
+                body = {"workflowId": workflow_id, "beforStep": before_step}
+                resp = _requests.post(
+                    url, json=body, headers=client._headers(), timeout=timeout,
+                )
+                resp.raise_for_status()
+                prompt_text = _parse_sse_content(resp.text)
+                if prompt_text:
+                    break
+                # Empty response — treat as failure and retry.
+                last_err = "empty SSE stream"
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+            if attempt < max_attempts:
+                click.echo(
+                    f"  ~ step {step_label} attempt {attempt} failed "
+                    f"({last_err}); retrying ...",
+                    err=True,
+                )
+                time.sleep(2)
+
+        if prompt_text:
+            new_s["emailContent"] = prompt_text
+        else:
+            click.echo(
+                f"  ! step {step_label}: /get/email/prompt failed after "
+                f"{max_attempts} attempts — {last_err}",
+                err=True,
+            )
+
+        updated.append(new_s)
+        before_step.append({
+            "emailSubject": new_s.get("emailSubject") or "",
+            "emailContent": new_s.get("emailContent") or "",
+        })
+    return updated
+
+
+# ═══════════════════════════════════════════════════════════
+# V2 save/setting body assembly
+# ═══════════════════════════════════════════════════════════
+
+def _pick_default_time_block_config() -> dict:
+    """Fallback timeTemplateConfig.properties when /get/setting returns an
+    empty flow. Matches settings.vue:324-340 hardcoded defaults.
+    """
+    return {
+        "notSendOnUsHolidaysEnabled": 1,
+        "useProspectTimezoneEnabled": 1,
+        "useDefaultTimezoneEnabled": 1,
+        "defaultTimezone": {"id": 106, "timezoneId": "", "displayName": ""},
+    }
+
+
+def _default_email_track() -> dict:
+    """Hardcoded emailTrack baseline when /get/setting doesn't supply one.
+    Matches settings.vue:285-290 default ref value.
+    """
+    return {
+        "emailUnsubscribe": False,
+        "mailSettingTemplateId": None,
+        "trackLinkClick": False,
+        "trackOpen": False,
+        "trackType": "",
+        "unsubscribeTemplate": (
+            "Don't want to get emails like this? "
+            "<%Unsubscribe from our emails%>"
+        ),
+    }
+
+
+def patch_meeting_route_id(
+    agent_prompt_list: list[dict],
+    meeting_router_id,
+) -> list[dict]:
+    """Inject ``meetingRouteId`` into the Book Meeting entry of an
+    agentPromptList (mirrors ai-reply.vue:175+192-194).
+
+    Returns a new list (shallow-copies mutated entry only). Leaves Drive
+    Traffic / Qualify Lead / Custom Goal untouched. No-op when the list
+    has no Book Meeting entry.
+    """
+    if not agent_prompt_list or meeting_router_id is None:
+        return agent_prompt_list or []
+    out = []
+    for entry in agent_prompt_list:
+        if entry.get("strategy") == "Book Meeting":
+            patched = dict(entry)
+            patched["meetingRouteId"] = meeting_router_id
+            out.append(patched)
+        else:
+            out.append(entry)
+    return out
+
+
+def build_save_setting_body(
+    workflow_id,
+    time_template: dict,
+    mailbox_list: list[dict],
+    setting_response: dict,
+    auto_approve: bool,
+    *,
+    enable_agent_reply: Optional[bool] = None,
+    agent_strategy: Optional[str] = None,
+    meeting_router_id=None,
+) -> dict:
+    """Assemble the full ``/save/setting`` body from its inputs.
+
+    Mirrors search-website/src/views/ai-sdr/settings.vue:317-356.
+
+    Sources:
+      * ``time_template`` — picked via :func:`pick_default_time_template`
+        (``/engage/api/v1/time/template/list``)
+      * ``mailbox_list`` — ``[{"addressId": ...}, ...]`` from the mailbox
+        selection wizard step
+      * ``setting_response`` — JSON from ``/get/setting/{flow_id}``; supplies
+        ``agentPromptList``, ``emailTrack``, ``enableAgentReply``,
+        ``agentStrategy``, ``isShowAiReply``. For a DRAFT flow it may have
+        most of these fields missing / null — we fall back to hardcoded
+        defaults to match the frontend's initial ref values.
+      * ``meeting_router_id`` — first item id from
+        ``/meeting/api/v1/meeting/personal/list``; patched into
+        ``agentPromptList[Book Meeting].meetingRouteId``.
+
+    ``enable_agent_reply`` / ``agent_strategy`` overrides let the CLI --flag
+    take precedence over what /get/setting returned.
+    """
+    setting = setting_response or {}
+
+    # /get/setting returns ``properties`` at the top level of ``data`` (not
+    # nested under ``setting.properties`` as an older doc suggested). The
+    # field is only populated for flows that already have a sequenceId
+    # (post-launch); DRAFT flows have no properties block.
+    existing_props = setting.get("properties") or {}
+
+    # timeTemplateConfig precedence:
+    #  1. If the caller supplied a concrete time_template (non-empty with an
+    #     id), use it — this is the CLI "override" path
+    #     (aiflow settings-update --time-template-id N).
+    #  2. Otherwise, if the flow already has one persisted (ACTIVE/PAUSED
+    #     flows after a prior save/setting), reuse it.
+    #  3. Otherwise build a fresh config from the picked template + the
+    #     hardcoded frontend defaults (fresh-DRAFT create path).
+    provided_template = bool((time_template or {}).get("id"))
+    if provided_template:
+        time_template_config = {
+            "name": time_template.get("name", ""),
+            "properties": time_template.get("properties")
+                          or _pick_default_time_block_config(),
+            "timeBlocks": time_template.get("timeBlocks") or [],
+        }
+        time_template_id = time_template.get("id")
+    elif existing_props.get("timeTemplateConfig"):
+        time_template_config = existing_props["timeTemplateConfig"]
+        time_template_id = existing_props.get("timeTemplateId")
+    else:
+        time_template_config = {
+            "name": (time_template or {}).get("name", ""),
+            "properties": (time_template or {}).get("properties")
+                          or _pick_default_time_block_config(),
+            "timeBlocks": (time_template or {}).get("timeBlocks") or [],
+        }
+        time_template_id = (time_template or {}).get("id")
+
+    email_track = existing_props.get("emailTrack") or _default_email_track()
+
+    properties = {
+        "timeTemplateConfig": time_template_config,
+        "emailTrack": email_track,
+        "sequenceMailboxList": mailbox_list,
+        "timeTemplateId": time_template_id,
+    }
+
+    body = {
+        "workflowId": workflow_id,
+        "properties": properties,
+        "autoApprove": bool(auto_approve),
+    }
+
+    # Agent-reply block: only included when the backend says the UI would
+    # show the AI reply controls (isShowAiReply True for flows created
+    # after 2026-02-07). Mirrors settings.vue:348-352.
+    if setting.get("isShowAiReply"):
+        agent_prompt_list = setting.get("agentPromptList") or []
+        if meeting_router_id is not None:
+            agent_prompt_list = patch_meeting_route_id(
+                agent_prompt_list, meeting_router_id
+            )
+        body["agentPromptList"] = agent_prompt_list
+        body["enableAgentReply"] = (
+            enable_agent_reply
+            if enable_agent_reply is not None
+            else bool(setting.get("enableAgentReply"))
+        )
+        body["agentStrategy"] = (
+            agent_strategy
+            if agent_strategy is not None
+            else (setting.get("agentStrategy") or "")
+        )
+
+    return body
+
+
+def pick_first_meeting_router_id(meetings_response: dict):
+    """Return the ``id`` of the first meeting router in a personal list
+    response, or ``None`` if the account has no meeting routers yet.
+
+    Mirrors ai-reply.vue:192-194:
+        if MEETING_ROUTERS.length && !selectedRouter:
+            selectedRouter = MEETING_ROUTERS[0].id
+    """
+    items = (meetings_response or {}).get("data") or []
+    if not items:
+        return None
+    return items[0].get("id")

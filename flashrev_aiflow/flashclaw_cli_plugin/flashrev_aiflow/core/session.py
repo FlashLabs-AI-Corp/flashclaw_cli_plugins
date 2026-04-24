@@ -5,6 +5,7 @@ Request chain:
                                                |-- discover-api  (no path prefix, routed via discover_prefix)
                                                |-- engage-api    (path prefix /engage)
                                                |-- mailsvc       (path prefix /mailsvc)
+                                               |-- meeting-svc   (routed via meeting_prefix, default /meeting)
 
 Credential file:  ~/.claude/skills/flashrev-aiflow-assistant/.env      (chmod 600)
 Config file:      ~/.claude/skills/flashrev-aiflow-assistant/config.json
@@ -55,6 +56,7 @@ DEFAULTS = {
     "discover_prefix": "/flashrev",
     "engage_prefix": "",
     "mailsvc_prefix": "",
+    "meeting_prefix": "/meeting-svc",
 }
 
 ENV_VAR_MAP = {
@@ -64,6 +66,7 @@ ENV_VAR_MAP = {
     "FLASHREV_AIFLOW_DISCOVER_PREFIX": "discover_prefix",
     "FLASHREV_AIFLOW_ENGAGE_PREFIX": "engage_prefix",
     "FLASHREV_AIFLOW_MAILSVC_PREFIX": "mailsvc_prefix",
+    "FLASHREV_AIFLOW_MEETING_PREFIX": "meeting_prefix",
 }
 
 # Name of the env var we read the API key from. Kept as a constant so that
@@ -202,4 +205,19 @@ def get_engage_prefix() -> str:
 def get_mailsvc_prefix() -> str:
     """Gateway prefix for mailsvc routes. Default '' (paths already start with /mailsvc)."""
     val = get_config_value("mailsvc_prefix") or ""
+    return val.rstrip("/")
+
+
+def get_meeting_prefix() -> str:
+    """Gateway prefix for meeting-svc routes. Default '/meeting-svc'.
+
+    The auth-gateway-svc route ``/meeting-svc`` targets the bare meeting-svc
+    domain (``https://meeting-api-test.eape.mobi`` on test/dev,
+    ``https://meeting-api.flashintel.ai`` on prod). After gateway
+    TrimPrefix, the full path (including the native ``/meeting/...``
+    segment that meeting-svc itself serves) is kept in the CLI client,
+    mirroring how ``/flashrev`` is wired against the bare discover-api
+    domain.
+    """
+    val = get_config_value("meeting_prefix") or ""
     return val.rstrip("/")

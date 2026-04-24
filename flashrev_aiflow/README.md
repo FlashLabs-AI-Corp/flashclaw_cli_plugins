@@ -131,127 +131,129 @@ Supported keys: `base_url`, `timeout`, `discover_prefix`, `engage_prefix`, `mail
 
 | Command                                   | Upstream endpoint                                                         |
 |-------------------------------------------|---------------------------------------------------------------------------|
-| `aiflow list [--status] [--page] [--page-size]` | `GET /api/v1/ai/workflow/agent/list`                              |
-| `aiflow show FLOW_ID`                      | `GET /api/v1/ai/workflow/agent/get/flow/{flowId}`                         |
-| `aiflow start FLOW_ID [--status TOKEN] [--required-tokens N] [--force]` | `GET /api/v1/ai/workflow/agent/sequence/status/{flowId}/{status}` + token pre-check |
-| `aiflow pause FLOW_ID [--status TOKEN]`    | same endpoint, status defaults to `pause`                                 |
+| `aiflow list [--type T] [--view V]`        | `POST /api/v1/ai/workflow/type/rows`                                      |
+| `aiflow show FLOW_ID`                      | `GET /api/v1/ai/workflow/detail/nodes/{flowId}`                           |
+| `aiflow start FLOW_ID [--status TOKEN] [--required-tokens N] [--force]` | `POST /api/v1/ai/workflow/status` body `{id, status:"ACTIVE"}` + token pre-check |
+| `aiflow pause FLOW_ID [--status TOKEN]`    | same endpoint, status defaults to `PAUSED`                                |
 | `aiflow resume FLOW_ID [--status TOKEN] [--required-tokens N] [--force]` | same endpoint + token pre-check                                |
-| `aiflow delete FLOW_ID [-y]`               | `GET /api/v1/ai/workflow/agent/delete/{flowId}`                           |
+| `aiflow delete FLOW_ID [-y]`               | `POST /api/v1/ai/workflow/delete` body `{id}`                             |
 | `aiflow rename FLOW_ID NEW_NAME`           | `POST /api/v1/ai/workflow/agent/update/name`                              |
-| `aiflow pitch show FLOW_ID`                | `GET /api/v1/ai/workflow/agent/get/pitch?flowId=...`                      |
-| `aiflow pitch init [--out PATH] [--force]` | Emit a local pitch.json scaffold (no network call; mirrors `examples/pitch.example.json`) |
-| `aiflow test-connection URL`               | `POST /api/v1/ai/workflow/agent/test/connection` (20s timeout)            |
-| `aiflow template`                          | `GET /api/v1/ai/workflow/agent/get/time/template`                         |
+| `aiflow pitch-show FLOW_ID`                | `GET /api/v1/ai/workflow/get/pitch/{flowId}` (returns ICP DTO, not 6-section text) |
+| `aiflow pitch-update FLOW_ID --url URL [--language]` | `POST /test/connection` -> `POST /save/pitch`                   |
+| `aiflow setting-show FLOW_ID`              | `GET /api/v1/ai/workflow/get/setting/{flowId}`                            |
+| `aiflow settings-update FLOW_ID [--time-template-id N] [--mailboxes MODE] [--auto-approve] [--enable-agent-reply] [--agent-strategy S]` | `GET /get/setting` -> merge flags -> `POST /save/setting` |
+| `aiflow prompt-show FLOW_ID [--step N] [--full]` | `POST /get/prompt` + per-step `POST /get/email/prompt` (short-circuit) |
+| `aiflow prompt-update FLOW_ID --file F.json` | `POST /api/v1/ai/workflow/save/prompt` (REPLACE semantics)              |
+| `aiflow draft`                             | `GET /api/v1/ai/workflow/draft` (read-only; no resume)                    |
+| `aiflow test-connection URL [--language]`  | `POST /api/v1/ai/workflow/test/connection` (20s timeout)                  |
 | `aiflow create`                            | Interactive wizard; see "Create wizard" below                             |
 
-### 60-second dry-run with the shipped example files
+### 60-second dry-run with the shipped example CSV
 
 ```bash
-# From the flashrev_aiflow/ directory:
 flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard --dry-run \
   --csv ./examples/contacts.example.csv \
-  --pitch-file ./examples/pitch.example.json \
-  --country-column country
+  --url acme.com --language en-us
 ```
 
-The example pitch JSON carries a top-level `url` field so `--website` is
-not required. See [`examples/README.md`](./examples/README.md) for more.
+`--dry-run` probes read-only endpoints only (mailboxes + token balance);
+all write endpoints print `[dry-run] would ...` without firing.
 
-### Author a pitch from scratch
+### Create a fresh flow end-to-end
 
 ```bash
-flashclaw-cli-plugin-flashrev-aiflow aiflow pitch init --out ./my-pitch.json
-# edit ./my-pitch.json, then:
 flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard \
   --csv ./contacts.csv \
-  --pitch-file ./my-pitch.json \
-  --country-column country \
+  --url acme.com --language en-us \
+  --regenerate-emails \
   --launch -y
 ```
 
+**Every run creates a brand-new flow.** There is no resume. If you have a
+stray DRAFT, inspect it with `aiflow draft` and clean up via
+`aiflow delete <id>` before creating again.
+
 ### Create wizard
 
-`flashclaw-cli-plugin-flashrev-aiflow aiflow create` runs an interactive
-wizard that mirrors the 3-step Strategy -> AIFlow -> Settings flow of the
-web UI, ending with an optional launch. Contacts can come from a local CSV
-or a public Google Sheet URL; pitch content is supplied either via
-`--pitch-file <path.json>` or via `$EDITOR` when the flag is omitted.
+`flashclaw-cli-plugin-flashrev-aiflow aiflow create` drives a V2 pipeline
+that mirrors the web UI's "URL → pitch → prompts → settings → launch"
+flow. Pitch content is **LLM-generated from `--url`** (no more local
+pitch.json input).
 
 ```
-# Interactive wizard (prompts fill in whatever you didn't pass)
+# Interactive wizard (prompts for missing fields)
 flashclaw-cli-plugin-flashrev-aiflow aiflow create
 
-# Wizard with flag pre-fills (skips those prompts)
+# Wizard with flag pre-fills
 flashclaw-cli-plugin-flashrev-aiflow aiflow create \
     --csv ./contacts.csv \
-    --website acme.com \
-    --pitch-file ./pitch.json \
-    --language en \
-    --email-rounds 2 \
+    --url acme.com \
+    --language en-us \
     --mailboxes all-active \
+    --regenerate-emails \
     --launch -y
 
-# Headless / CI — no prompts. Every missing field raises USAGE_*.
+# Headless / CI — every missing field raises USAGE_*
 flashclaw-cli-plugin-flashrev-aiflow --json aiflow create --no-wizard \
     --csv ./contacts.csv \
-    --pitch-file ./pitch.json \
-    --country-column country \
-    --website acme.com \
-    --language en \
-    --mailboxes all-active \
+    --url acme.com \
+    --language en-us \
+    --regenerate-emails \
     --launch -y
 
-# Validate inputs without creating anything on the backend.
+# Dry-run: no side effects
 flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard --dry-run \
-    --csv ./contacts.csv --pitch-file ./pitch.json --country-column country
+    --csv ./contacts.csv --url acme.com --language en-us
 ```
 
 **`--no-wizard` required-field matrix**
 
 | Field | Required when |
 |---|---|
-| `--csv` or `--sheet` | Always (exactly one; both given -> `USAGE_CONTACT_SOURCE_CONFLICT`) |
-| `--pitch-file` | Always (no interactive editor in `--no-wizard`) |
-| `--website` | Always — unless the pitch file has a top-level `"url"` field |
-| `--country-column` | When `--language=auto` (default). Pass `none` to explicitly skip |
-| `--mailboxes` | Optional (default `all-active`); a comma list that matches nothing -> `USAGE_MAILBOX_NO_MATCH` |
-| `--launch` / `--no-launch` | Optional (default: save as draft in `--no-wizard`) |
+| `--csv` or `--sheet` | Always (exactly one) |
+| `--url` | Always (pitch content is LLM-generated from this) |
+| `--language` | Optional (default `en-us`); pass `auto` for per-contact detection |
+| `--country-column` | Required when `--language=auto`; pass `none` to skip |
+| `--mailboxes` | Optional (default `all-active`) |
+| `--regenerate-emails` | Required for `--launch` unless you're OK with empty emails |
+| `--launch` / `--no-launch` | Optional (default: save as DRAFT in `--no-wizard`) |
+
+**Launch-time completeness gate**
+
+`--launch` is blocked with exit code 2 + `AIFLOW_LAUNCH_PROMPTS_INCOMPLETE`
+when any step still has empty `emailSubject` / `emailContent` — launching
+such a flow would produce zero sends. Re-run with `--regenerate-emails` to
+have the LLM fill them in (costs tokens), or drop `--launch` to park the
+flow as DRAFT and edit on the web UI.
 
 **`--dry-run` semantics**
 
 | Step | Dry-run behaviour |
 |---|---|
-| CSV parse / Sheet download / pitch-file validation / country-column check | Runs fully (local) |
-| `POST /contacts/upload`, `POST /create/list`, `POST /save/pitch`, `POST /save/email/config`, launch | Skipped — printed as `[dry-run] would ...` |
-| `GET /mailboxes`, `GET /time/template`, `GET /api/v2/oauth/me` (token balance) | Executed (read-only) so the summary shows actual mailbox count + token remaining |
+| CSV parse / Sheet download / country-column check | Runs fully (local) |
+| `/contacts/upload`, `/create/list`, `/test/connection`, `/save/pitch`, `/get/prompt`, `/save/prompt`, `/save/setting` | Skipped — printed as `[dry-run] would ...` |
+| `/mailboxes`, `/api/v2/oauth/me` (token balance) | Executed (read-only) |
 
-`--dry-run` creates nothing on the backend — safe to run as a CI pre-flight before a real `aiflow create`.
+### V2 Pipeline
 
-Pipeline (all through auth-gateway-svc with the `/flashrev` prefix):
+Every `aiflow create` flows through auth-gateway-svc with the `/flashrev` prefix:
 
-1. `POST /api/v1/ai/workflow/contacts/upload`        -> `{listId, listName}`
-2. `POST /api/v1/ai/workflow/create/list`            -> `{flowId}`
-3. `POST /api/v1/ai/workflow/save/pitch`             save 6-section pitch
-4. `GET  /api/v1/ai/workflow/agent/get/time/template` preview default sequence
-5. `POST /api/v1/ai/workflow/agent/get/email/config`  load current config
-6. `POST /api/v1/ai/workflow/agent/save/email/config` save with user edits
-7. `GET  /api/v1/ai/workflow/agent/sequence/status/{flowId}/ACTIVE` launch
+1. `POST /api/v1/ai/workflow/contacts/upload`   -> `{listId, listName}`
+2. `POST /api/v1/ai/workflow/create/list`       -> `{flowId}`  (NEW flow)
+3. `POST /api/v1/ai/workflow/test/connection`   `{url, language}` -> ICP DTO (LLM-generated pitch)
+4. `POST /api/v1/ai/workflow/save/pitch`        persist pitch with `workflowId`
+5. `POST /api/v1/ai/workflow/get/prompt`        seed default step rows in `t_ai_workflow_prompt`
+6. *(when `--regenerate-emails`)*
+   - `POST /api/v1/ai/workflow/get/email/prompt` per-step, with `beforStep` history
+   - `POST /api/v1/ai/workflow/get/email`        per-step, LLM-generated subject + content
+7. `POST /api/v1/ai/workflow/save/prompt`       persist the (regenerated) step prompts
+8. *(when `--launch`)*
+   - `GET  /api/v1/ai/workflow/get/setting/{flowId}`  -> `agentPromptList`, `emailTrack`, defaults
+   - `GET  /engage/api/v1/time/template/list`         -> pick `timeTemplateConfig`
+   - `POST /meeting-svc/api/v1/meeting/personal/list` -> first `id` -> Book Meeting `meetingRouteId`
+   - `POST /api/v1/ai/workflow/save/setting`          persist settings + DRAFT -> ACTIVE
 
-**Pitch JSON schema** (keys accepted by `--pitch-file`):
-
-```json
-{
-  "officialDescription": "Value Proposition paragraph",
-  "painPoints":   ["..."],
-  "solutions":    ["..."],
-  "proofPoints":  ["..."],
-  "callToActions":["..."],
-  "leadMagnets":  ["..."]
-}
-```
-
-`workflowId`, `url`, `language`, `useConfigLanguage` are filled in by the
-wizard — do not include them in the file.
+`--no-launch` stops after step 7; the flow stays DRAFT.
 
 **Exit codes** for create:
 
@@ -342,8 +344,9 @@ a small change on the gateway side, see the project note at the bottom).
 | Command               | Upstream endpoint                                       |
 |-----------------------|---------------------------------------------------------|
 | `mailboxes list [--status] [--warmup]` | `GET /mailsvc/mail-address/simple/v2/list` |
-| `mailboxes bind-list` | `GET /api/v1/ai/workflow/agent/get/bind/email`          |
-| `mailboxes has-active`| `GET /api/v1/ai/workflow/agent/has/active/email`        |
+| `mailboxes bind-list FLOW_ID`   | `GET /api/v1/ai/workflow/get/bind/email/{flowId}`       |
+| `mailboxes unbind-list FLOW_ID` | `GET /api/v1/ai/workflow/get/unbind/email/{flowId}`     |
+| `mailboxes has-active`          | `GET /api/v1/ai/workflow/has/active/email`              |
 
 ### health
 
