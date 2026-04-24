@@ -688,6 +688,10 @@ class TestCreateNoWizard(unittest.TestCase):
         self.client_stub.save_pitch.assert_not_called()
         self.client_stub.save_email_config.assert_not_called()
         self.client_stub.set_aiflow_status.assert_not_called()
+        # get_workflow_prompt has a DB side-effect on first call, so
+        # dry-run must NOT invoke it either.
+        if hasattr(self.client_stub, "get_workflow_prompt"):
+            self.client_stub.get_workflow_prompt.assert_not_called()
         # Read-only probes that the summary depends on did fire.
         self.client_stub.list_mailboxes.assert_called_once()
         self.client_stub.get_token_balance.assert_called_once()
