@@ -1012,10 +1012,10 @@ class TestCreateNoWizardV2(unittest.TestCase):
 
     # ── prompt completeness gate ────────────────────────────
 
-    def test_launch_blocked_when_prompts_incomplete(self):
-        """If any step has empty emailSubject/emailContent and user doesn't
-        pass --regenerate-emails, --launch must be blocked with
-        AIFLOW_LAUNCH_PROMPTS_INCOMPLETE."""
+    def test_launch_blocked_with_no_regenerate_emails_flag(self):
+        """When user explicitly passes --no-regenerate-emails, step rows
+        stay empty; --launch must be blocked by the completeness gate
+        with AIFLOW_LAUNCH_PROMPTS_INCOMPLETE."""
         self.client_stub.upload_contacts_csv.return_value = {
             "code": 200, "data": {"listId": 1, "listName": "c.csv"},
         }
@@ -1027,25 +1027,67 @@ class TestCreateNoWizardV2(unittest.TestCase):
             "data": {"officialDescription": "desc", "painPoints": []},
         }
         self.client_stub.save_pitch.return_value = {"code": 200}
-        # 3 steps, all with empty content (default seed behaviour)
-        self.client_stub.get_workflow_prompt.return_value = {
-            "code": 200,
-            "data": [
-                {"id": 10, "step": 1, "emailSubject": "", "emailContent": ""},
-                {"id": 11, "step": 2, "emailSubject": "", "emailContent": ""},
-                {"id": 12, "step": 3, "emailSubject": "", "emailContent": ""},
+        # 1st /get/prompt call returns [] -> wizard triggers seed_default_steps;
+        # 2nd (re-query inside seed_default_steps) returns 3 empty rows
+        # simulating the just-seeded skeleton.
+        self.client_stub.get_workflow_prompt.side_effect = [
+            [],
+            [
+                {"id": 10, "workflowStepId": 10, "step": 1,
+                 "delayMinutes": 60, "emailSubject": "", "emailContent": ""},
+                {"id": 11, "workflowStepId": 11, "step": 2,
+                 "delayMinutes": 4320, "emailSubject": "", "emailContent": ""},
+                {"id": 12, "workflowStepId": 12, "step": 3,
+                 "delayMinutes": 10080, "emailSubject": "", "emailContent": ""},
             ],
-        }
+        ]
+        self.client_stub.save_prompt.return_value = {"code": 200, "data": True}
 
         result = self._invoke(
             "--no-wizard", "--csv", str(self.csv_path),
             "--url", "acme.com", "--language", "en-us",
+            "--no-regenerate-emails",      # explicit opt-out
             "--launch", "-y",
         )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("AIFLOW_LAUNCH_PROMPTS_INCOMPLETE", result.output)
         # save_setting must NOT have been called — launch was blocked
         self.client_stub.save_setting.assert_not_called()
+        # Gate message should mention prompt-update as the recovery path.
+        self.assertIn("prompt-update", result.output)
+
+    def test_default_create_triggers_regenerate_emails(self):
+        """The default --regenerate-emails=True path must hit
+        /get/email/prompt per seeded step. We don't run a real network
+        call here — just assert the wizard announces the regenerate
+        pass (proof the flag is default-on)."""
+        self.client_stub.upload_contacts_csv.return_value = {
+            "code": 200, "data": {"listId": 1, "listName": "c.csv"},
+        }
+        self.client_stub.create_aiflow_from_list.return_value = {
+            "code": 200, "data": {"id": 999},
+        }
+        self.client_stub.test_website_connection.return_value = {
+            "code": 200, "data": {"officialDescription": "d"},
+        }
+        self.client_stub.save_pitch.return_value = {"code": 200}
+        self.client_stub.get_workflow_prompt.return_value = []
+        # Stub save_prompt so seed_default_steps can run without real HTTP.
+        self.client_stub.save_prompt.return_value = {"code": 200}
+
+        # --no-launch so we don't need to mock /get/setting, meetings etc.
+        result = self._invoke(
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "en-us",
+            "--no-launch",
+        )
+        # Regardless of whether the LLM calls succeed on the stub, the
+        # wizard should announce "Generating email prompt templates"
+        # (the default-on regenerate path). A `--no-regenerate-emails`
+        # run would show the yellow warning instead.
+        self.assertIn("Generating email prompt templates", result.output)
+        self.assertNotIn("--no-regenerate-emails: step rows will be saved",
+                         result.output)
 
 
 class TestAiflowEditCommands(unittest.TestCase):
