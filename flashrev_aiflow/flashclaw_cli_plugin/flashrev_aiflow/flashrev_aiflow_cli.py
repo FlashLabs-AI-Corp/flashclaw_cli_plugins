@@ -51,10 +51,11 @@ def _require_api_key():
         return key
     click.echo()
     click.secho("API Key not configured", fg="yellow")
-    click.echo("  Run: flashclaw-cli-plugin-flashrev-aiflow auth login --token <your-api-key>")
+    click.echo("  Create or copy a key at: https://info.flashlabs.ai/settings/privateApps")
+    click.echo("  Then bind it locally:")
+    click.echo("    flashclaw-cli-plugin-flashrev-aiflow auth login --token sk_xxx")
     click.echo()
-    click.echo("  Generate an API Key in the FlashRev console -> Settings -> Private Apps.")
-    click.echo("  Key format starts with sk_, e.g.: sk_aBcDeFgH...")
+    click.echo("  Key format starts with 'sk_', e.g. sk_aBcDeFgH...")
     click.echo()
     sys.exit(1)
 
@@ -89,14 +90,17 @@ def _check_token_balance(client, required: int = None, force: bool = False):
     if required is not None and bal["tokenRemaining"] < required:
         emit_error(
             f"Insufficient tokens: need {required}, "
-            f"have {bal['tokenRemaining']:.0f}. Use --force to bypass.",
+            f"have {bal['tokenRemaining']:.0f}. "
+            "Top up at https://info.flashlabs.ai/settings/credit "
+            "or pass --force to bypass this CLI-side check.",
             code="TOKEN_INSUFFICIENT",
             details=bal,
         )
     if required is None and not bal["sufficient"]:
         emit_error(
             "Token balance exhausted (remaining <= 0). "
-            "Use --force to bypass the CLI-side check.",
+            "Top up at https://info.flashlabs.ai/settings/credit "
+            "or pass --force to bypass this CLI-side check.",
             code="TOKEN_EXHAUSTED",
             details=bal,
         )
@@ -1699,13 +1703,15 @@ def token_check(required):
     if required is not None and bal["tokenRemaining"] < required:
         emit_error(
             f"Insufficient tokens: need {required}, "
-            f"have {bal['tokenRemaining']:.0f}",
+            f"have {bal['tokenRemaining']:.0f}. "
+            "Top up at https://info.flashlabs.ai/settings/credit.",
             code="TOKEN_INSUFFICIENT",
             details=bal,
         )
     if required is None and not bal["sufficient"]:
         emit_error(
-            "Token balance exhausted (remaining <= 0)",
+            "Token balance exhausted (remaining <= 0). "
+            "Top up at https://info.flashlabs.ai/settings/credit.",
             code="TOKEN_EXHAUSTED",
             details=bal,
         )
