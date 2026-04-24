@@ -165,9 +165,12 @@ all write endpoints print `[dry-run] would ...` without firing.
 flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard \
   --csv ./contacts.csv \
   --url acme.com --language en-us \
-  --regenerate-emails \
   --launch -y
 ```
+
+LLM generation of the per-step `emailContent` prompt templates is **on by
+default** — every launched flow ships with non-empty prompts so the
+scheduler can actually produce emails at send time.
 
 **Every run creates a brand-new flow.** There is no resume. If you have a
 stray DRAFT, inspect it with `aiflow draft` and clean up via
@@ -190,7 +193,6 @@ flashclaw-cli-plugin-flashrev-aiflow aiflow create \
     --url acme.com \
     --language en-us \
     --mailboxes all-active \
-    --regenerate-emails \
     --launch -y
 
 # Headless / CI — every missing field raises USAGE_*
@@ -198,12 +200,17 @@ flashclaw-cli-plugin-flashrev-aiflow --json aiflow create --no-wizard \
     --csv ./contacts.csv \
     --url acme.com \
     --language en-us \
-    --regenerate-emails \
     --launch -y
 
 # Dry-run: no side effects
 flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard --dry-run \
     --csv ./contacts.csv --url acme.com --language en-us
+
+# Skip LLM regenerate (scaffolding only — launch will be blocked until
+# you populate prompts via aiflow prompt-update)
+flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard \
+    --csv ./contacts.csv --url acme.com --language en-us \
+    --no-regenerate-emails
 ```
 
 **`--no-wizard` required-field matrix**
@@ -215,16 +222,19 @@ flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard --dry-run \
 | `--language` | Optional (default `en-us`); pass `auto` for per-contact detection |
 | `--country-column` | Required when `--language=auto`; pass `none` to skip |
 | `--mailboxes` | Optional (default `all-active`) |
-| `--regenerate-emails` | Required for `--launch` unless you're OK with empty emails |
+| `--regenerate-emails` / `--no-regenerate-emails` | Optional (default: ON — LLM-fills every step's emailContent) |
 | `--launch` / `--no-launch` | Optional (default: save as DRAFT in `--no-wizard`) |
 
 **Launch-time completeness gate**
 
 `--launch` is blocked with exit code 2 + `AIFLOW_LAUNCH_PROMPTS_INCOMPLETE`
-when any step still has empty `emailSubject` / `emailContent` — launching
-such a flow would produce zero sends. Re-run with `--regenerate-emails` to
-have the LLM fill them in (costs tokens), or drop `--launch` to park the
-flow as DRAFT and edit on the web UI.
+when any step still has empty `emailContent` — launching such a flow would
+produce zero sends. With `--regenerate-emails` default-on, this normally
+only fires when the LLM flaked on one or more steps after the built-in
+retries; the fix is to re-run `aiflow create` or populate the failing
+step(s) via `aiflow prompt-update FLOW_ID --file prompts.json`. If you
+passed `--no-regenerate-emails`, all steps will be empty → populate them
+before launching.
 
 **`--dry-run` semantics**
 
@@ -242,11 +252,11 @@ Every `aiflow create` flows through auth-gateway-svc with the `/flashrev` prefix
 2. `POST /api/v1/ai/workflow/create/list`       -> `{flowId}`  (NEW flow)
 3. `POST /api/v1/ai/workflow/test/connection`   `{url, language}` -> ICP DTO (LLM-generated pitch)
 4. `POST /api/v1/ai/workflow/save/pitch`        persist pitch with `workflowId`
-5. `POST /api/v1/ai/workflow/get/prompt`        seed default step rows in `t_ai_workflow_prompt`
-6. *(when `--regenerate-emails`)*
-   - `POST /api/v1/ai/workflow/get/email/prompt` per-step, with `beforStep` history
-   - `POST /api/v1/ai/workflow/get/email`        per-step, LLM-generated subject + content
-7. `POST /api/v1/ai/workflow/save/prompt`       persist the (regenerated) step prompts
+5. `POST /api/v1/ai/workflow/get/prompt`        check + seed default step rows (3× delays 1h/3d/7d)
+6. **`POST /api/v1/ai/workflow/get/email/prompt`** per-step, with `beforStep` history
+   — default on (`--regenerate-emails=True`); fills the emailContent prompt
+   template so the scheduler has something to feed into the LLM at send time.
+7. `POST /api/v1/ai/workflow/save/prompt`       persist the step prompts
 8. *(when `--launch`)*
    - `GET  /api/v1/ai/workflow/get/setting/{flowId}`  -> `agentPromptList`, `emailTrack`, defaults
    - `GET  /engage/api/v1/time/template/list`         -> pick `timeTemplateConfig`

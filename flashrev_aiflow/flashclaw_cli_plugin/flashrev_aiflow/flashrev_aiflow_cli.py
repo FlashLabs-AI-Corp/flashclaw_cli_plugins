@@ -940,14 +940,15 @@ def aiflow_settings_update(
               help="CSV column name carrying the contact country/region "
                    "(or 'none' to skip). Required in --no-wizard mode when "
                    "--language=auto.")
-@click.option("--regenerate-emails", "regenerate_emails", is_flag=True,
-              help="Run the per-step LLM pass (POST /get/email/prompt + "
-                   "POST /get/email) to fill in emailSubject / emailContent / "
-                   "subject / content for each step before /save/prompt. "
-                   "Without this flag the wizard only runs /get/prompt (which "
-                   "seeds empty step rows); launching will then be blocked by "
-                   "a completeness check unless every step already has "
-                   "non-empty content. Costs tokens — one /get/email per step.")
+@click.option("--regenerate-emails/--no-regenerate-emails",
+              "regenerate_emails", default=True, show_default=True,
+              help="Run the per-step LLM pass (POST /get/email/prompt) to "
+                   "fill in the emailContent prompt template for every step "
+                   "before /save/prompt. Default ON — a flow launched with "
+                   "empty prompt templates cannot produce emails at send "
+                   "time, so the wizard always populates them unless you "
+                   "explicitly pass --no-regenerate-emails (useful for "
+                   "quick scaffolding + editing via prompt-update).")
 @click.option("--mailboxes", "mailbox_mode", default="all-active",
               show_default=True,
               help="'all-active' to pick every active mailbox, or a comma-"
@@ -969,8 +970,8 @@ def aiflow_settings_update(
 @click.option("--launch/--no-launch", "launch_now", default=None,
               help="Launch the AIFlow after save. In --no-wizard mode, "
                    "defaults to --no-launch (save as draft) unless --launch "
-                   "is passed. Launch is blocked when prompts are incomplete; "
-                   "use --regenerate-emails to fill them in first.")
+                   "is passed. Launch is blocked when any step's emailContent "
+                   "is empty (see --regenerate-emails, default on).")
 @click.option("-y", "--yes", is_flag=True,
               help="Skip the final confirmation prompt.")
 @click.option("--force", is_flag=True,
@@ -988,10 +989,13 @@ def aiflow_create(
       2. POST {discover}/create/list           -> {flowId}   (NEW flow)
       3. POST {discover}/test/connection       -> LLM-generated pitch DTO
       4. POST {discover}/save/pitch            -> persist pitch
-      5. POST {discover}/get/prompt            -> seed default step rows
-      6. [--regenerate-emails]
-         POST {discover}/get/email/prompt      per-step, with beforStep ctx
-         POST {discover}/get/email             per-step, LLM subject+content
+      5. POST {discover}/get/prompt            -> ensure 3 default step rows
+                                                  (seed via /save/prompt if none)
+      6. POST {discover}/get/email/prompt      per-step, with beforStep ctx
+                                                  (default on; fills
+                                                  emailContent prompt template
+                                                  so the scheduler can
+                                                  generate emails at send time)
       7. POST {discover}/save/prompt           -> persist step prompts
       8. [--launch]
          GET  {discover}/get/setting/{flowId}  -> agentPromptList/emailTrack defaults
@@ -1036,7 +1040,7 @@ def _run_create_wizard(
     url=None,
     language="en-us",
     country_column=None,
-    regenerate_emails=False,
+    regenerate_emails=True,
     mailbox_mode="all-active",
     auto_approve=True,
     enable_agent_reply=None,
@@ -1052,10 +1056,12 @@ def _run_create_wizard(
     interactive=True : prompt for missing fields (wizard mode).
     interactive=False: raise USAGE_* errors for missing fields (--no-wizard).
     dry_run=True     : run only local validation + read-only probes.
-    regenerate_emails=True: run per-step /get/email/prompt + /get/email so
-                            every step lands with full content. Default False
-                            (empty emailSubject / emailContent; launch will
-                            be blocked by the completeness gate).
+    regenerate_emails=True (default): run per-step /get/email/prompt so each
+                            step lands with a non-empty emailContent prompt
+                            template — required for the scheduler to actually
+                            produce emails at send time. Pass False only for
+                            scaffolding runs where prompt-update will fill
+                            the content in before launch.
     """
     from flashclaw_cli_plugin.flashrev_aiflow import wizard
 
@@ -1293,7 +1299,7 @@ def _run_create_wizard(
             f"  Steps in t_ai_workflow_prompt: {len(prompt_steps)}"
         )
 
-    # ── 2. Prompts — optional LLM regenerate, then save/prompt ──
+    # ── 2. Prompts — LLM regenerate (default on), then save/prompt ──
     click.echo()
     click.secho(f"{header}Step 2 / 3 - Prompts", fg="cyan", bold=True)
     if regenerate_emails:
@@ -1304,17 +1310,19 @@ def _run_create_wizard(
             )
         else:
             click.echo(
-                f"  Regenerating email prompt templates for "
+                f"  Generating email prompt templates for "
                 f"{len(prompt_steps)} step(s) via /get/email/prompt (LLM) ..."
             )
             prompt_steps = wizard.regenerate_step_content(
                 client, flow_id, prompt_steps,
             )
     else:
-        click.echo(
-            "  --regenerate-emails not set; step rows have empty content. "
-            "Re-run with --regenerate-emails to populate emailContent prompt "
-            "templates before launch."
+        click.secho(
+            "  --no-regenerate-emails: step rows will be saved with EMPTY "
+            "emailContent. The flow will be unable to produce emails at send "
+            "time until you populate each step via `aiflow prompt-update "
+            "FLOW_ID --file ...`.",
+            fg="yellow",
         )
 
     incomplete = wizard.count_incomplete_prompts(prompt_steps)
@@ -1396,14 +1404,26 @@ def _run_create_wizard(
         else:
             launch_now = False
 
-    # Completeness gate — block launch when content missing unless user
-    # explicitly opted into --regenerate-emails or every step is already full.
+    # Completeness gate — block launch when any step's emailContent is still
+    # empty. With --regenerate-emails on by default, this normally only fires
+    # when one or more LLM calls failed after the built-in retries; the fix
+    # is to either re-run `aiflow create` or populate the failing step(s)
+    # manually via `aiflow prompt-update`.
     if launch_now and not dry_run and incomplete > 0:
+        recovery = (
+            "Re-run `aiflow create` (the LLM sometimes flakes and a fresh "
+            "run may succeed) or populate the empty step(s) manually via "
+            "`aiflow prompt-update FLOW_ID --file prompts.json`. Drop "
+            "--launch to leave the flow as DRAFT and edit later."
+        ) if regenerate_emails else (
+            "You passed --no-regenerate-emails, so all steps were saved "
+            "empty. Re-run `aiflow create` without that flag, or populate "
+            "step(s) via `aiflow prompt-update FLOW_ID --file prompts.json` "
+            "before launching."
+        )
         emit_error(
             f"{incomplete} of {len(prompt_steps)} email step(s) have empty "
-            "content; launching would produce no sends. Re-run with "
-            "`--regenerate-emails --launch` to fill them in via LLM, or skip "
-            "--launch to save as DRAFT and edit in the web UI.",
+            f"content; launching would produce no sends. {recovery}",
             code="AIFLOW_LAUNCH_PROMPTS_INCOMPLETE",
             details={
                 "totalSteps": len(prompt_steps),
@@ -1483,7 +1503,8 @@ def _run_create_wizard(
     else:
         click.echo(
             "  Flow left as DRAFT (no save/setting call). Re-run with "
-            "--launch + --regenerate-emails to launch the next time."
+            "--launch next time, or use `aiflow settings-update` to launch "
+            "this flow after editing."
         )
 
     # ── Summary ─────────────────────────────────────────────
@@ -1531,8 +1552,9 @@ def _run_create_wizard(
             emit(launch_result)
     else:
         click.echo(
-            f"Saved as DRAFT (flowId={flow_id}). Re-run with "
-            "--regenerate-emails --launch to activate."
+            f"Saved as DRAFT (flowId={flow_id}). Activate later with "
+            "`aiflow settings-update {flow_id} --enable-agent-reply` "
+            "or re-run `aiflow create --launch`."
         )
 
 
