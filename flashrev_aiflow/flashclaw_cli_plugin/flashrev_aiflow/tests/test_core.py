@@ -200,7 +200,8 @@ class TestClientEndpoints(unittest.TestCase):
 
         self.assertEqual(mock_post.call_args[1]["timeout"], 20)
         self.assertEqual(
-            mock_post.call_args[1]["json"], {"url": "https://acme.com"}
+            mock_post.call_args[1]["json"],
+            {"url": "https://acme.com", "language": "en-us"},
         )
 
 
@@ -500,37 +501,408 @@ class TestNewClientEndpoints(unittest.TestCase):
         self.assertEqual(body["type"], "csv")
         self.assertEqual(body["source"], "csv")
 
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.get")
+    def test_get_pitch_uses_path_param(self, mock_get):
+        mock_get.return_value = self._mock_response({"code": 200, "data": {}})
+
+        self.client.get_pitch("abc123")
+
+        called_url = mock_get.call_args[0][0]
+        self.assertIn(
+            "/flashrev/api/v1/ai/workflow/get/pitch/abc123", called_url
+        )
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.get")
+    def test_get_bind_email_uses_path_param(self, mock_get):
+        mock_get.return_value = self._mock_response({"code": 200, "data": []})
+
+        self.client.get_bind_email("f1")
+
+        called_url = mock_get.call_args[0][0]
+        self.assertIn(
+            "/flashrev/api/v1/ai/workflow/get/bind/email/f1", called_url
+        )
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.get")
+    def test_get_unbind_email_uses_path_param(self, mock_get):
+        mock_get.return_value = self._mock_response({"code": 200, "data": []})
+
+        self.client.get_unbind_email("f2")
+
+        called_url = mock_get.call_args[0][0]
+        self.assertIn(
+            "/flashrev/api/v1/ai/workflow/get/unbind/email/f2", called_url
+        )
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.get")
+    def test_has_active_email_no_agent_segment(self, mock_get):
+        mock_get.return_value = self._mock_response({"code": 200, "data": True})
+
+        self.client.has_active_email()
+
+        called_url = mock_get.call_args[0][0]
+        self.assertIn(
+            "/flashrev/api/v1/ai/workflow/has/active/email", called_url
+        )
+        # Regression guard: the old /agent/ segment must be gone.
+        self.assertNotIn("/agent/has/active/email", called_url)
+
     @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
-    def test_email_config_endpoints(self, mock_post):
+    def test_test_connection_no_agent_segment(self, mock_post):
         mock_post.return_value = self._mock_response({"code": 200})
 
-        self.client.get_email_config({"workflowId": "f1"})
+        self.client.test_website_connection("https://acme.com")
+
+        called_url = mock_post.call_args[0][0]
         self.assertIn(
-            "/flashrev/api/v1/ai/workflow/agent/get/email/config",
-            mock_post.call_args[0][0],
+            "/flashrev/api/v1/ai/workflow/test/connection", called_url
+        )
+        self.assertNotIn("/agent/test/connection", called_url)
+
+
+class TestV2ClientEndpoints(unittest.TestCase):
+    """New V2 endpoints added to client.py (URL-driven pitch + full launch)."""
+
+    def setUp(self):
+        from flashclaw_cli_plugin.flashrev_aiflow.core.client import (
+            FlashrevAiflowClient,
+        )
+        self.client = FlashrevAiflowClient(
+            base_url="https://gateway.example.com", api_key="sk_test",
+        )
+        self.client.discover_prefix = "/flashrev"
+        self.client.engage_prefix = ""
+        self.client.mailsvc_prefix = ""
+        self.client.meeting_prefix = "/meeting-svc"
+
+    def _mock_response(self, payload):
+        r = MagicMock()
+        r.raise_for_status = MagicMock()
+        r.json.return_value = payload
+        r.content = json.dumps(payload).encode()
+        return r
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
+    def test_test_website_connection_sends_language(self, mock_post):
+        mock_post.return_value = self._mock_response({"code": 200, "data": {}})
+        self.client.test_website_connection("https://baidu.com", "en-us")
+        body = mock_post.call_args[1]["json"]
+        self.assertEqual(body, {"url": "https://baidu.com", "language": "en-us"})
+        self.assertEqual(mock_post.call_args[1]["timeout"], 20)
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
+    def test_save_pitch_path_no_agent_segment(self, mock_post):
+        mock_post.return_value = self._mock_response({"code": 200})
+        self.client.save_pitch({"workflowId": 1})
+        called_url = mock_post.call_args[0][0]
+        self.assertIn("/flashrev/api/v1/ai/workflow/save/pitch", called_url)
+        self.assertNotIn("/agent/save/pitch", called_url)
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
+    def test_get_email_prompt_defaults_empty_beforstep(self, mock_post):
+        mock_post.return_value = self._mock_response({"code": 200})
+        self.client.get_email_prompt(1114)
+        body = mock_post.call_args[1]["json"]
+        self.assertEqual(body["workflowId"], 1114)
+        self.assertEqual(body["beforStep"], [])
+        self.assertNotIn("workflowStepId", body)
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
+    def test_get_email_prompt_forwards_step_context(self, mock_post):
+        mock_post.return_value = self._mock_response({"code": 200})
+        self.client.get_email_prompt(
+            1114, workflow_step_id=99,
+            before_step=[{"emailSubject": "s", "emailContent": "c"}],
+        )
+        body = mock_post.call_args[1]["json"]
+        self.assertEqual(body["workflowStepId"], 99)
+        self.assertEqual(len(body["beforStep"]), 1)
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
+    def test_save_prompt_shape(self, mock_post):
+        mock_post.return_value = self._mock_response(True)
+        self.client.save_prompt(1114, [{"workflowStepId": 1, "step": 1}])
+        body = mock_post.call_args[1]["json"]
+        self.assertEqual(body["workflowId"], 1114)
+        self.assertEqual(body["prompts"][0]["step"], 1)
+        called_url = mock_post.call_args[0][0]
+        self.assertIn("/flashrev/api/v1/ai/workflow/save/prompt", called_url)
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.get")
+    def test_get_setting_path(self, mock_get):
+        mock_get.return_value = self._mock_response({"code": 200, "data": {}})
+        self.client.get_setting(1114)
+        called_url = mock_get.call_args[0][0]
+        self.assertIn("/flashrev/api/v1/ai/workflow/get/setting/1114", called_url)
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.get")
+    def test_get_draft_workflow_path(self, mock_get):
+        mock_get.return_value = self._mock_response({"code": 200, "data": {}})
+        self.client.get_draft_workflow()
+        called_url = mock_get.call_args[0][0]
+        self.assertIn("/flashrev/api/v1/ai/workflow/draft", called_url)
+
+    @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
+    def test_list_personal_meetings_uses_meeting_prefix(self, mock_post):
+        mock_post.return_value = self._mock_response({"code": 200, "data": []})
+        self.client.list_personal_meetings("foo", "bar")
+        called_url = mock_post.call_args[0][0]
+        # Full path: gateway prefix /meeting-svc + native /meeting/... path.
+        # Gateway targets the bare meeting-svc domain, so the /meeting/
+        # segment is kept on the CLI side (mirrors /flashrev's setup).
+        self.assertIn(
+            "/meeting-svc/meeting/api/v1/meeting/personal/list", called_url
+        )
+        self.assertNotIn("/flashrev/", called_url)
+        body = mock_post.call_args[1]["json"]
+        self.assertEqual(body, {"meetName": "foo", "meetType": "bar"})
+
+
+class TestWizardV2Helpers(unittest.TestCase):
+    """V2 wizard helpers: pitch body, prompt body, settings assembly."""
+
+    def test_build_save_pitch_body_spreads_icp_and_overrides(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        icp = {
+            "officialDescription": "desc",
+            "painPoints": ["p1", "p2"],
+            "url": "",  # should be overridden
+            "language": "",  # should be overridden
+        }
+        body = wizard.build_save_pitch_body(1114, icp, "baidu.com", "en-us")
+        self.assertEqual(body["workflowId"], 1114)
+        self.assertEqual(body["url"], "https://baidu.com")  # https:// added
+        self.assertEqual(body["language"], "en-us")
+        self.assertFalse(body["useConfigLanguage"])
+        self.assertEqual(body["officialDescription"], "desc")
+        self.assertEqual(body["painPoints"], ["p1", "p2"])
+
+    def test_build_save_pitch_body_auto_language_sets_useConfigLanguage(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        body = wizard.build_save_pitch_body(
+            1, {"officialDescription": "d"}, "https://acme.com", "auto",
+        )
+        self.assertTrue(body["useConfigLanguage"])
+        self.assertEqual(body["language"], "auto")
+
+    def test_prompt_step_completeness(self):
+        """Complete = emailContent (prompt template) non-empty; subject /
+        content / emailSubject can stay blank (mirrors frontend save/prompt
+        sample body where step 1 and step 3 ship with everything empty but
+        step 2 has a full emailContent)."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        self.assertTrue(wizard.prompt_step_is_complete(
+            {"emailContent": "You are a cold email copywriter..."}
+        ))
+        # emailContent missing -> incomplete, even if emailSubject is set.
+        self.assertFalse(wizard.prompt_step_is_complete(
+            {"emailSubject": "s", "emailContent": ""}
+        ))
+        # Whitespace-only emailContent counts as empty.
+        self.assertFalse(wizard.prompt_step_is_complete(
+            {"emailContent": "   "}
+        ))
+        self.assertFalse(wizard.prompt_step_is_complete({}))
+
+    def test_count_incomplete_prompts(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        steps = [
+            {"emailContent": "template-a"},
+            {"emailContent": ""},                 # incomplete
+            {"emailContent": "template-c"},
+        ]
+        self.assertEqual(wizard.count_incomplete_prompts(steps), 1)
+
+    def test_parse_sse_content_concatenates_content_events(self):
+        """SSE parser pulls data from type=content events and concatenates."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        raw = (
+            '{"type":"content","data":""}\n'
+            '{"type":"content","data":"You are "}\n'
+            '{"type":"content","data":"a cold email "}\n'
+            '{"type":"content","data":"copywriter."}\n'
+            '{"type":"done"}\n'
+            ':keepalive-comment-line\n'
+        )
+        self.assertEqual(
+            wizard._parse_sse_content(raw),
+            "You are a cold email copywriter.",
         )
 
-        self.client.save_email_config({
-            "workflowId": "f1", "properties": {}, "autoApprove": True,
-        })
-        self.assertIn(
-            "/flashrev/api/v1/ai/workflow/agent/save/email/config",
-            mock_post.call_args[0][0],
+    def test_parse_sse_content_tolerates_data_prefix(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        raw = (
+            'data: {"type":"content","data":"hello"}\n'
+            'data: {"type":"content","data":" world"}\n'
+        )
+        self.assertEqual(
+            wizard._parse_sse_content(raw),
+            "hello world",
         )
 
+    def test_parse_sse_content_strips_trailing_terminator(self):
+        """Backend emits ``</content>`` as the stream close marker — the
+        parser must strip it so callers get a clean prompt template."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        raw = (
+            '{"type":"content","data":"EC1"}\n'
+            '{"type":"content","data":"</content>"}\n'
+        )
+        self.assertEqual(wizard._parse_sse_content(raw), "EC1")
 
-class TestCreateNoWizard(unittest.TestCase):
-    """Flag-matrix + dry-run contract for `aiflow create --no-wizard`."""
+    def test_seed_default_steps_posts_three_skeleton_rows(self):
+        """seed_default_steps ships 3 empty rows (1h/3d/7d) to /save/prompt
+        then re-queries /get/prompt to fetch the new step IDs."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        # Re-query after save returns the seeded rows with IDs.
+        client.get_workflow_prompt.return_value = [
+            {"id": 100, "step": 1, "delayMinutes": 60},
+            {"id": 101, "step": 2, "delayMinutes": 4320},
+            {"id": 102, "step": 3, "delayMinutes": 10080},
+        ]
+        result = wizard.seed_default_steps(client, 1117)
+
+        client.save_prompt.assert_called_once()
+        args, _ = client.save_prompt.call_args
+        workflow_id, prompts = args
+        self.assertEqual(workflow_id, 1117)
+        self.assertEqual(len(prompts), 3)
+        self.assertEqual([p["delayMinutes"] for p in prompts],
+                         [60, 4320, 10080])
+        # Skeleton rows must have no workflowStepId (backend auto-assigns).
+        for p in prompts:
+            self.assertNotIn("workflowStepId", p)
+            self.assertEqual(p["emailContent"], "")
+        # Re-query must have run and returned the 3 rows with IDs.
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[0]["id"], 100)
+
+    def test_build_save_prompt_body_requires_step_id(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        with self.assertRaises(click.UsageError):
+            wizard.build_save_prompt_body(1, [{"step": 1}])  # no id
+
+    def test_build_save_prompt_body_maps_fields(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        body = wizard.build_save_prompt_body(1114, [
+            {"workflowStepId": 10, "step": 1, "emailSubject": "es",
+             "emailContent": "ec", "subject": "s", "content": "c",
+             "delayMinutes": 60},
+            {"id": 11, "step": 2, "exampleSubject": "xs",
+             "exampleContent": "xc"},  # example* -> subject/content fallback
+        ])
+        self.assertEqual(body["workflowId"], 1114)
+        p1, p2 = body["prompts"]
+        self.assertEqual(p1["workflowStepId"], 10)
+        self.assertEqual(p1["delayMinutes"], 60)
+        self.assertEqual(p2["workflowStepId"], 11)
+        # default delay for step 2 (index 1) is 4320 (3 days)
+        self.assertEqual(p2["delayMinutes"], 4320)
+        # example* mapped to subject/content
+        self.assertEqual(p2["subject"], "xs")
+        self.assertEqual(p2["content"], "xc")
+
+    def test_patch_meeting_route_id_only_on_book_meeting(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        lst = [
+            {"strategy": "Book Meeting", "meetingRouteId": 0, "prompt": "a"},
+            {"strategy": "Drive Traffic", "meetingRouteId": 0, "prompt": "b"},
+        ]
+        patched = wizard.patch_meeting_route_id(lst, 483)
+        self.assertEqual(patched[0]["meetingRouteId"], 483)
+        self.assertEqual(patched[1]["meetingRouteId"], 0)  # untouched
+
+    def test_pick_first_meeting_router_id(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        self.assertEqual(
+            wizard.pick_first_meeting_router_id(
+                {"code": 200, "data": [{"id": 7}, {"id": 8}]}
+            ),
+            7,
+        )
+        self.assertIsNone(
+            wizard.pick_first_meeting_router_id({"code": 200, "data": []})
+        )
+        self.assertIsNone(wizard.pick_first_meeting_router_id({}))
+
+    def test_build_save_setting_body_draft_flow(self):
+        """Fresh DRAFT flow: /get/setting has no .setting.properties block,
+        so the wizard falls back to hardcoded defaults + picked template."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        template = {
+            "id": 135487,
+            "name": "my-template",
+            "properties": {"foo": "bar"},
+            "timeBlocks": [{"startTime": "10:00", "endTime": "17:00"}],
+        }
+        setting = {
+            "isShowAiReply": True,
+            "autoApprove": None,
+            "enableAgentReply": None,
+            "agentStrategy": None,
+            "agentPromptList": [
+                {"strategy": "Book Meeting", "prompt": "bm"},
+                {"strategy": "Drive Traffic", "prompt": "dt"},
+            ],
+        }
+        body = wizard.build_save_setting_body(
+            1114, template, [{"addressId": 1479}], setting,
+            True, meeting_router_id=483,
+        )
+        self.assertEqual(body["workflowId"], 1114)
+        self.assertTrue(body["autoApprove"])
+        props = body["properties"]
+        self.assertEqual(props["timeTemplateId"], 135487)
+        self.assertEqual(props["timeTemplateConfig"]["name"], "my-template")
+        self.assertEqual(props["sequenceMailboxList"], [{"addressId": 1479}])
+        # emailTrack falls back to hardcoded default
+        self.assertIn("unsubscribeTemplate", props["emailTrack"])
+        # agent block present because isShowAiReply is True
+        self.assertEqual(len(body["agentPromptList"]), 2)
+        self.assertEqual(body["agentPromptList"][0]["meetingRouteId"], 483)
+
+    def test_build_save_setting_body_hides_agent_block_pre_2026_02_07(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        body = wizard.build_save_setting_body(
+            1, {}, [], {"isShowAiReply": False}, True,
+        )
+        # agent block is NOT in the body when isShowAiReply is False
+        self.assertNotIn("agentPromptList", body)
+        self.assertNotIn("enableAgentReply", body)
+
+    def test_build_save_setting_body_flag_override_beats_server(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        body = wizard.build_save_setting_body(
+            1, {}, [],
+            {"isShowAiReply": True, "enableAgentReply": False,
+             "agentStrategy": "Qualify Lead", "agentPromptList": []},
+            True,
+            enable_agent_reply=True,
+            agent_strategy="Custom Goal",
+        )
+        self.assertTrue(body["enableAgentReply"])
+        self.assertEqual(body["agentStrategy"], "Custom Goal")
+
+
+class TestCreateNoWizardV2(unittest.TestCase):
+    """V2 `aiflow create --no-wizard` flag matrix + dry-run contract.
+
+    Pipeline under test:
+      upload_contacts_csv -> create_aiflow_from_list -> test_website_connection
+      -> save_pitch -> get_workflow_prompt -> [regenerate_emails] -> save_prompt
+      -> [launch] get_setting + pick_default_time_template + list_personal_meetings
+                  -> save_setting
+    """
 
     def setUp(self):
         from click.testing import CliRunner
-
         from flashclaw_cli_plugin.flashrev_aiflow import flashrev_aiflow_cli
 
         self.runner = CliRunner()
         self.cli = flashrev_aiflow_cli.cli
 
-        # Every invocation needs an API key; patch the session getter.
         self.key_patch = patch(
             "flashclaw_cli_plugin.flashrev_aiflow."
             "flashrev_aiflow_cli.get_api_key",
@@ -538,7 +910,6 @@ class TestCreateNoWizard(unittest.TestCase):
         )
         self.key_patch.start()
 
-        # Point the client factory at a stub so no real HTTP ever fires.
         self.client_stub = MagicMock()
         self.client_stub.list_mailboxes.return_value = {
             "code": 200,
@@ -547,14 +918,9 @@ class TestCreateNoWizard(unittest.TestCase):
                 {"id": "m2", "address": "b@x.com", "status": "ACTIVE"},
             ],
         }
-        self.client_stub.get_time_template.return_value = {
-            "code": 200, "data": {"emails": []},
-        }
         self.client_stub.get_token_balance.return_value = {
-            "tokenTotal": 100.0,
-            "tokenCost": 10.0,
-            "tokenRemaining": 90.0,
-            "sufficient": True,
+            "tokenTotal": 100.0, "tokenCost": 10.0,
+            "tokenRemaining": 90.0, "sufficient": True,
         }
         self.build_patch = patch(
             "flashclaw_cli_plugin.flashrev_aiflow."
@@ -563,24 +929,10 @@ class TestCreateNoWizard(unittest.TestCase):
         )
         self.build_patch.start()
 
-        # Write a valid CSV + pitch file for the happy-path dry-run.
         self.tmpdir = tempfile.mkdtemp()
         self.csv_path = Path(self.tmpdir) / "contacts.csv"
         self.csv_path.write_text(
             "name,email,country\nAlice,a@b.com,US\nBob,b@c.com,CA\n",
-            encoding="utf-8",
-        )
-        self.pitch_path = Path(self.tmpdir) / "pitch.json"
-        self.pitch_path.write_text(
-            json.dumps({
-                "officialDescription": "A short value prop.",
-                "painPoints": ["p1"],
-                "solutions": ["s1"],
-                "proofPoints": [],
-                "callToActions": ["Book a demo"],
-                "leadMagnets": [],
-                "url": "acme.com",
-            }),
             encoding="utf-8",
         )
 
@@ -589,151 +941,115 @@ class TestCreateNoWizard(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _invoke(self, *args):
-        # --json makes emit_error emit the structured {"error": CODE, ...}
-        # blob so tests can assert on the code, not the English message.
         return self.runner.invoke(
-            self.cli,
-            ["--json", "aiflow", "create", *args],
+            self.cli, ["--json", "aiflow", "create", *args],
             catch_exceptions=False,
         )
 
-    # ── missing required flags ──────────────────────────────
+    # ── flag matrix ─────────────────────────────────────────
 
-    def test_no_wizard_errors_when_neither_csv_nor_sheet(self):
+    def test_errors_when_neither_csv_nor_sheet(self):
         result = self._invoke(
-            "--no-wizard", "--pitch-file", str(self.pitch_path),
-            "--website", "acme.com",
+            "--no-wizard", "--url", "acme.com", "--country-column", "none",
         )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("USAGE_CONTACT_SOURCE", result.output)
 
-    def test_no_wizard_errors_when_both_csv_and_sheet(self):
+    def test_errors_when_url_missing(self):
         result = self._invoke(
-            "--no-wizard",
-            "--csv", str(self.csv_path),
-            "--sheet", "https://docs.google.com/spreadsheets/d/x/edit",
-            "--pitch-file", str(self.pitch_path),
-            "--website", "acme.com",
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--country-column", "none",
         )
         self.assertNotEqual(result.exit_code, 0)
-        # Either the non-wizard exclusive check or the conflict check fires;
-        # both are acceptable (both use USAGE_CONTACT_SOURCE* codes).
-        self.assertIn("USAGE_CONTACT_SOURCE", result.output)
+        self.assertIn("USAGE_URL_REQUIRED", result.output)
 
-    def test_no_wizard_errors_when_pitch_file_missing(self):
+    def test_errors_when_country_column_missing_for_auto(self):
         result = self._invoke(
-            "--no-wizard",
-            "--csv", str(self.csv_path),
-            "--website", "acme.com",
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "auto", "--dry-run",
         )
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("USAGE_PITCH_FILE_REQUIRED",
-                      result.output)
+        self.assertIn("USAGE_COUNTRY_COLUMN_MISSING", result.output)
 
-    def test_no_wizard_errors_when_country_column_missing_for_auto(self):
-        # language defaults to 'auto' so country-column is required.
+    def test_country_column_not_required_for_fixed_language(self):
+        # language=en-us (the new default) => country-column is optional
         result = self._invoke(
-            "--no-wizard",
-            "--csv", str(self.csv_path),
-            "--pitch-file", str(self.pitch_path),
-            "--website", "acme.com",
-            "--dry-run",
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--dry-run",
         )
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("USAGE_COUNTRY_COLUMN_MISSING",
-                      result.output)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
 
-    def test_no_wizard_errors_when_country_column_not_in_csv(self):
+    def test_mailboxes_filter_no_match_in_no_wizard(self):
         result = self._invoke(
-            "--no-wizard",
-            "--csv", str(self.csv_path),
-            "--pitch-file", str(self.pitch_path),
-            "--website", "acme.com",
-            "--country-column", "not_a_real_column",
-            "--dry-run",
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "en-us",
+            "--mailboxes", "nonexistent_id", "--dry-run",
         )
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("USAGE_COUNTRY_COLUMN_NOT_FOUND",
-                      result.output)
-
-    def test_no_wizard_errors_when_mailboxes_filter_matches_nothing(self):
-        result = self._invoke(
-            "--no-wizard",
-            "--csv", str(self.csv_path),
-            "--pitch-file", str(self.pitch_path),
-            "--website", "acme.com",
-            "--country-column", "country",
-            "--mailboxes", "nonexistent_id",
-            "--dry-run",
-        )
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("USAGE_MAILBOX_NO_MATCH",
-                      result.output)
+        self.assertIn("USAGE_MAILBOX_NO_MATCH", result.output)
 
     # ── dry-run contract ────────────────────────────────────
 
-    def test_dry_run_does_not_call_write_endpoints(self):
+    def test_dry_run_skips_all_write_endpoints(self):
         result = self._invoke(
-            "--no-wizard",
-            "--csv", str(self.csv_path),
-            "--pitch-file", str(self.pitch_path),
-            "--website", "acme.com",
-            "--country-column", "country",
-            "--dry-run",
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "en-us", "--dry-run",
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        # None of the write endpoints must have fired.
+        # All write endpoints must be skipped
         self.client_stub.upload_contacts_csv.assert_not_called()
         self.client_stub.create_aiflow_from_list.assert_not_called()
+        self.client_stub.test_website_connection.assert_not_called()
         self.client_stub.save_pitch.assert_not_called()
-        self.client_stub.save_email_config.assert_not_called()
-        self.client_stub.set_aiflow_status.assert_not_called()
-        # get_workflow_prompt has a DB side-effect on first call, so
-        # dry-run must NOT invoke it either.
-        if hasattr(self.client_stub, "get_workflow_prompt"):
-            self.client_stub.get_workflow_prompt.assert_not_called()
-        # Read-only probes that the summary depends on did fire.
+        self.client_stub.get_workflow_prompt.assert_not_called()
+        self.client_stub.save_prompt.assert_not_called()
+        self.client_stub.save_setting.assert_not_called()
+        self.client_stub.list_personal_meetings.assert_not_called()
+        # Read-only probes fired
         self.client_stub.list_mailboxes.assert_called_once()
         self.client_stub.get_token_balance.assert_called_once()
-        # Summary mentions dry-run.
         self.assertIn("Dry-run complete", result.output)
 
-    def test_dry_run_accepts_url_from_pitch_file(self):
-        # Drop --website; pitch file carries 'url': 'acme.com'.
-        result = self._invoke(
-            "--no-wizard",
-            "--csv", str(self.csv_path),
-            "--pitch-file", str(self.pitch_path),
-            "--country-column", "country",
-            "--dry-run",
-        )
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("https://acme.com", result.output)
+    # ── prompt completeness gate ────────────────────────────
 
-    def test_dry_run_errors_when_url_missing_everywhere(self):
-        bare_pitch = Path(self.tmpdir) / "pitch_no_url.json"
-        bare_pitch.write_text(
-            json.dumps({
-                "officialDescription": "v",
-                "painPoints": [], "solutions": [],
-                "proofPoints": [], "callToActions": [], "leadMagnets": [],
-            }),
-            encoding="utf-8",
-        )
+    def test_launch_blocked_when_prompts_incomplete(self):
+        """If any step has empty emailSubject/emailContent and user doesn't
+        pass --regenerate-emails, --launch must be blocked with
+        AIFLOW_LAUNCH_PROMPTS_INCOMPLETE."""
+        self.client_stub.upload_contacts_csv.return_value = {
+            "code": 200, "data": {"listId": 1, "listName": "c.csv"},
+        }
+        self.client_stub.create_aiflow_from_list.return_value = {
+            "code": 200, "data": {"id": 999},
+        }
+        self.client_stub.test_website_connection.return_value = {
+            "code": 200,
+            "data": {"officialDescription": "desc", "painPoints": []},
+        }
+        self.client_stub.save_pitch.return_value = {"code": 200}
+        # 3 steps, all with empty content (default seed behaviour)
+        self.client_stub.get_workflow_prompt.return_value = {
+            "code": 200,
+            "data": [
+                {"id": 10, "step": 1, "emailSubject": "", "emailContent": ""},
+                {"id": 11, "step": 2, "emailSubject": "", "emailContent": ""},
+                {"id": 12, "step": 3, "emailSubject": "", "emailContent": ""},
+            ],
+        }
+
         result = self._invoke(
-            "--no-wizard",
-            "--csv", str(self.csv_path),
-            "--pitch-file", str(bare_pitch),
-            "--country-column", "country",
-            "--dry-run",
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "en-us",
+            "--launch", "-y",
         )
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("USAGE_WEBSITE_MISSING",
-                      result.output)
+        self.assertIn("AIFLOW_LAUNCH_PROMPTS_INCOMPLETE", result.output)
+        # save_setting must NOT have been called — launch was blocked
+        self.client_stub.save_setting.assert_not_called()
 
 
-class TestPitchInit(unittest.TestCase):
-    """`aiflow pitch init` writes a valid pitch.json scaffold (no network)."""
+class TestAiflowEditCommands(unittest.TestCase):
+    """pitch-update / prompt-show / prompt-update / settings-update."""
 
     def setUp(self):
         from click.testing import CliRunner
@@ -741,102 +1057,288 @@ class TestPitchInit(unittest.TestCase):
 
         self.runner = CliRunner()
         self.cli = flashrev_aiflow_cli.cli
+
+        self.key_patch = patch(
+            "flashclaw_cli_plugin.flashrev_aiflow."
+            "flashrev_aiflow_cli.get_api_key",
+            return_value="sk_test",
+        )
+        self.key_patch.start()
+
+        self.client_stub = MagicMock()
+        self.build_patch = patch(
+            "flashclaw_cli_plugin.flashrev_aiflow."
+            "flashrev_aiflow_cli._build_client",
+            return_value=self.client_stub,
+        )
+        self.build_patch.start()
+
         self.tmpdir = tempfile.mkdtemp()
 
     def tearDown(self):
+        patch.stopall()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_init_writes_scaffold_with_all_required_sections(self):
-        out = Path(self.tmpdir) / "pitch.json"
+    # ── pitch-update ────────────────────────────────────────
+
+    def test_pitch_update_calls_test_connection_then_save_pitch(self):
+        self.client_stub.test_website_connection.return_value = {
+            "code": 200,
+            "data": {
+                "officialDescription": "Acme Corp description",
+                "painPoints": ["p1", "p2"],
+                "solutions": ["s1"],
+                "proofPoints": [],
+                "callToActions": ["CTA"],
+                "leadMagnets": [],
+            },
+        }
+        self.client_stub.save_pitch.return_value = {"code": 200}
+
         result = self.runner.invoke(
             self.cli,
-            ["aiflow", "pitch", "init", "--out", str(out)],
+            ["--json", "aiflow", "pitch-update", "9001",
+             "--url", "acme.com", "--language", "en-us"],
             catch_exceptions=False,
         )
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertTrue(out.exists())
-        data = json.loads(out.read_text(encoding="utf-8"))
-        # 6 required pitch sections (per PitchStrategySection.vue) must be present.
-        for key in (
-            "officialDescription",
-            "painPoints",
-            "solutions",
-            "proofPoints",
-            "callToActions",
-            "leadMagnets",
-        ):
-            self.assertIn(key, data)
-        # Optional convenience fields that let --website be omitted.
-        self.assertIn("url", data)
-        self.assertIn("language", data)
+        self.client_stub.test_website_connection.assert_called_once_with(
+            "acme.com", "en-us",
+        )
+        # save_pitch body must carry the workflowId + normalised https URL.
+        save_args = self.client_stub.save_pitch.call_args[0][0]
+        self.assertEqual(save_args["workflowId"], "9001")
+        self.assertEqual(save_args["url"], "https://acme.com")
+        self.assertEqual(save_args["language"], "en-us")
+        self.assertFalse(save_args["useConfigLanguage"])
+        self.assertEqual(save_args["officialDescription"], "Acme Corp description")
 
-    def test_init_refuses_overwrite_without_force(self):
-        out = Path(self.tmpdir) / "pitch.json"
-        out.write_text("already here", encoding="utf-8")
+    def test_pitch_update_auto_language_sets_use_config_language(self):
+        self.client_stub.test_website_connection.return_value = {
+            "code": 200, "data": {"officialDescription": "x"}
+        }
+        self.client_stub.save_pitch.return_value = {"code": 200}
 
         result = self.runner.invoke(
             self.cli,
-            ["--json", "aiflow", "pitch", "init", "--out", str(out)],
+            ["--json", "aiflow", "pitch-update", "9001",
+             "--url", "acme.com", "--language", "auto"],
             catch_exceptions=False,
         )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # test/connection still hits a concrete language (auto -> en-us).
+        self.client_stub.test_website_connection.assert_called_once_with(
+            "acme.com", "en-us",
+        )
+        save_args = self.client_stub.save_pitch.call_args[0][0]
+        self.assertTrue(save_args["useConfigLanguage"])
+        self.assertEqual(save_args["language"], "auto")
 
+    # ── prompt-update ───────────────────────────────────────
+
+    def test_prompt_update_errors_on_missing_file(self):
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "prompt-update", "9001",
+             "--file", "/nonexistent/prompts.json"],
+            catch_exceptions=False,
+        )
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("PITCH_INIT_FILE_EXISTS", result.output)
-        # File must remain untouched.
-        self.assertEqual(out.read_text(encoding="utf-8"), "already here")
+        self.assertIn("PROMPT_FILE_NOT_FOUND", result.output)
 
-    def test_init_overwrites_with_force(self):
-        out = Path(self.tmpdir) / "pitch.json"
-        out.write_text("stale", encoding="utf-8")
+    def test_prompt_update_errors_on_bad_json(self):
+        bad = Path(self.tmpdir) / "bad.json"
+        bad.write_text("not json at all", encoding="utf-8")
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "prompt-update", "9001",
+             "--file", str(bad)],
+            catch_exceptions=False,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("PROMPT_FILE_INVALID_JSON", result.output)
+
+    def test_prompt_update_errors_on_empty_array(self):
+        empty = Path(self.tmpdir) / "empty.json"
+        empty.write_text("[]", encoding="utf-8")
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "prompt-update", "9001",
+             "--file", str(empty)],
+            catch_exceptions=False,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("PROMPT_FILE_SHAPE_ERROR", result.output)
+
+    def test_prompt_update_errors_on_missing_delay_minutes(self):
+        broken = Path(self.tmpdir) / "broken.json"
+        broken.write_text('[{"step": 1}]', encoding="utf-8")
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "prompt-update", "9001",
+             "--file", str(broken)],
+            catch_exceptions=False,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("PROMPT_FILE_MISSING_DELAY", result.output)
+
+    def test_prompt_update_forwards_array_to_save_prompt(self):
+        self.client_stub.save_prompt.return_value = {"code": 200, "data": True}
+        prompts = [
+            {"step": 1, "delayMinutes": 60, "emailContent": "template-a",
+             "emailSubject": "", "subject": "", "content": ""},
+            {"step": 2, "delayMinutes": 4320, "emailContent": "template-b",
+             "emailSubject": "", "subject": "", "content": ""},
+        ]
+        path = Path(self.tmpdir) / "p.json"
+        path.write_text(json.dumps(prompts), encoding="utf-8")
 
         result = self.runner.invoke(
             self.cli,
-            ["aiflow", "pitch", "init", "--out", str(out), "--force"],
+            ["--json", "aiflow", "prompt-update", "9001",
+             "--file", str(path)],
             catch_exceptions=False,
         )
-
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        data = json.loads(out.read_text(encoding="utf-8"))
-        self.assertIn("officialDescription", data)
+        self.client_stub.save_prompt.assert_called_once()
+        flow_id_arg, prompts_arg = self.client_stub.save_prompt.call_args[0]
+        self.assertEqual(flow_id_arg, "9001")
+        self.assertEqual(len(prompts_arg), 2)
+        self.assertEqual(prompts_arg[0]["emailContent"], "template-a")
 
-    def test_init_scaffold_validates_against_wizard_schema(self):
-        """The scaffold must pass wizard.validate_pitch_schema unchanged so
-        users can `aiflow pitch init` then hand the file straight to
-        `aiflow create --pitch-file` with zero edits if they only want a
-        smoke-test dry-run.
-        """
-        from flashclaw_cli_plugin.flashrev_aiflow.flashrev_aiflow_cli import (
-            _pitch_scaffold,
+    # ── settings-update ─────────────────────────────────────
+
+    def test_settings_update_errors_when_no_flag(self):
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "settings-update", "9001"],
+            catch_exceptions=False,
         )
-        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("USAGE_NO_SETTING_UPDATE", result.output)
 
-        scaffold = _pitch_scaffold()
-        validated = wizard.validate_pitch_schema(scaffold)
+    def test_settings_update_mailboxes_all_active(self):
+        # /get/setting snapshot — emailTrack + agentPromptList passthrough.
+        self.client_stub.get_setting.return_value = {
+            "isShowAiReply": True,
+            "autoApprove": True,
+            "enableAgentReply": False,
+            "agentStrategy": "",
+            "agentPromptList": [{"strategy": "Book Meeting", "prompt": "bm"}],
+            "properties": {
+                "timeTemplateConfig": {"name": "existing"},
+                "timeTemplateId": 135,
+                "emailTrack": {"trackOpen": True},
+                "sequenceMailboxList": [{"addressId": 999}],
+            },
+        }
+        self.client_stub.list_mailboxes.return_value = {
+            "code": 200,
+            "data": [
+                {"id": 1479, "address": "a@x.com", "status": "ACTIVE"},
+                {"id": 1480, "address": "b@x.com", "status": "ACTIVE"},
+            ],
+        }
+        self.client_stub.save_setting.return_value = {
+            "code": 200, "data": True,
+        }
+
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "settings-update", "9001",
+             "--mailboxes", "all-active"],
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.client_stub.list_time_templates.assert_not_called()
+        save_body = self.client_stub.save_setting.call_args[0][0]
+        mailbox_list = save_body["properties"]["sequenceMailboxList"]
+        self.assertEqual({m["addressId"] for m in mailbox_list}, {1479, 1480})
+        # emailTrack passthrough preserved.
         self.assertEqual(
-            validated["officialDescription"], scaffold["officialDescription"]
+            save_body["properties"]["emailTrack"], {"trackOpen": True}
         )
-        self.assertEqual(validated["painPoints"], scaffold["painPoints"])
-        # url should pass through (validate_pitch_schema retains it now).
-        self.assertEqual(validated.get("url"), "acme.com")
-
-
-class TestPitchShowBackwardCompat(unittest.TestCase):
-    """Ensure `aiflow pitch` is now a group that still exposes the old show path."""
-
-    def test_pitch_is_a_group_with_show_and_init(self):
-        from flashclaw_cli_plugin.flashrev_aiflow import flashrev_aiflow_cli
-
-        pitch_group = flashrev_aiflow_cli.aiflow.commands["pitch"]
-        self.assertTrue(
-            hasattr(pitch_group, "commands"),
-            msg="aiflow pitch must be a group so that init + show can coexist",
+        # timeTemplateConfig preserved since --time-template-id not passed.
+        self.assertEqual(
+            save_body["properties"]["timeTemplateConfig"]["name"], "existing"
         )
-        self.assertIn("show", pitch_group.commands)
-        self.assertIn("init", pitch_group.commands)
-        # show still accepts a positional FLOW_ID.
-        show_cmd = pitch_group.commands["show"]
-        self.assertIn("flow_id", [p.name for p in show_cmd.params])
+
+    def test_settings_update_time_template_id_override(self):
+        self.client_stub.get_setting.return_value = {
+            "isShowAiReply": False,
+            "autoApprove": False,
+            "properties": {
+                "timeTemplateConfig": {"name": "old"},
+                "timeTemplateId": 100,
+                "sequenceMailboxList": [{"addressId": 1}],
+            },
+        }
+        self.client_stub.list_time_templates.return_value = {
+            "code": 200,
+            "data": [
+                {"id": 200, "name": "new-tpl",
+                 "properties": {"notSendOnUsHolidaysEnabled": 1},
+                 "timeBlocks": [{"startTime": "09:00"}]},
+            ],
+        }
+        self.client_stub.save_setting.return_value = {"code": 200, "data": True}
+
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "settings-update", "9001",
+             "--time-template-id", "200"],
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        save_body = self.client_stub.save_setting.call_args[0][0]
+        self.assertEqual(save_body["properties"]["timeTemplateId"], 200)
+        self.assertEqual(
+            save_body["properties"]["timeTemplateConfig"]["name"], "new-tpl"
+        )
+
+    def test_settings_update_time_template_id_not_found(self):
+        self.client_stub.get_setting.return_value = {"setting": {}}
+        self.client_stub.list_time_templates.return_value = {
+            "code": 200,
+            "data": [{"id": 100, "name": "x"}],
+        }
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "settings-update", "9001",
+             "--time-template-id", "999"],
+            catch_exceptions=False,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("TIME_TEMPLATE_NOT_FOUND", result.output)
+        self.client_stub.save_setting.assert_not_called()
+
+    def test_settings_update_auto_approve_flag(self):
+        self.client_stub.get_setting.return_value = {
+            "isShowAiReply": True,
+            "autoApprove": True,  # current
+            "enableAgentReply": False,
+            "agentStrategy": "Book Meeting",
+            "agentPromptList": [],
+            "properties": {
+                "sequenceMailboxList": [{"addressId": 1}],
+                "timeTemplateConfig": {"name": "t"},
+                "timeTemplateId": 1,
+            },
+        }
+        self.client_stub.save_setting.return_value = {"code": 200}
+
+        result = self.runner.invoke(
+            self.cli,
+            ["--json", "aiflow", "settings-update", "9001",
+             "--no-auto-approve"],
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        save_body = self.client_stub.save_setting.call_args[0][0]
+        self.assertFalse(save_body["autoApprove"])
+        # Other flags preserved from /get/setting.
+        self.assertEqual(save_body["agentStrategy"], "Book Meeting")
 
 
 if __name__ == "__main__":

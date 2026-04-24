@@ -18,23 +18,24 @@ commands:
   - name: config show
     description: Show current configuration (base_url, env, prefixes)
   - name: config set
-    description: Set a config value (base_url, timeout, discover_prefix, engage_prefix, mailsvc_prefix)
+    description: Set a config value (base_url, timeout, discover_prefix, engage_prefix, mailsvc_prefix, meeting_prefix)
     args: KEY VALUE
     examples:
       - config set base_url https://open-ai-api-test.eape.mobi
       - config set discover_prefix /flashrev
+      - config set meeting_prefix /meeting-svc
       - config set timeout 60
   - name: config unset
     description: Remove a config value (revert to default)
     args: KEY
   - name: aiflow create
-    description: Create a new AIFlow (Strategy -> AIFlow -> Settings -> Launch). Default wizard prompts for missing fields; --no-wizard turns every missing field into a USAGE_* error (CI-friendly). --dry-run validates inputs and probes read-only endpoints (mailbox list + token balance) without calling any write endpoint.
-    args: --no-wizard --dry-run --csv PATH --sheet URL --website URL --pitch-file PATH --language LANG --country-column COL --email-rounds N --mailboxes MODE --auto-approve/--no-auto-approve --launch/--no-launch -y --force
+    description: Create a NEW AIFlow (every run builds a fresh flow — DRAFTs are never reused). V2 pipeline upload+create+test_connection+save_pitch+get_prompt+(optional regenerate)+save_prompt, then on --launch get_setting+time-template-pick+meeting-list+save_setting. Pitch content is LLM-generated from --url (no local pitch.json any more). --launch is blocked with AIFLOW_LAUNCH_PROMPTS_INCOMPLETE when step content is empty; pass --regenerate-emails to fill in via LLM (costs tokens).
+    args: --no-wizard --dry-run --csv PATH --sheet URL --url URL --language LANG --country-column COL --regenerate-emails --mailboxes MODE --auto-approve/--no-auto-approve --enable-agent-reply/--no-enable-agent-reply --agent-strategy STRATEGY --launch/--no-launch -y --force
     examples:
       - aiflow create
-      - aiflow create --csv ./contacts.csv --website acme.com --pitch-file ./pitch.json --language en --country-column country --mailboxes all-active -y
-      - aiflow create --no-wizard --csv ./contacts.csv --pitch-file ./pitch.json --country-column country --dry-run
-      - aiflow create --no-wizard --sheet https://docs.google.com/spreadsheets/d/ABC/edit --pitch-file ./pitch.json --country-column country --launch -y
+      - aiflow create --csv ./contacts.csv --url acme.com --language en-us --mailboxes all-active -y
+      - aiflow create --no-wizard --csv ./contacts.csv --url baidu.com --language en-us --dry-run
+      - aiflow create --no-wizard --csv ./contacts.csv --url acme.com --language en-us --regenerate-emails --launch -y
   - name: aiflow list
     description: List AIFlows
     args: --status S --page N --page-size N
@@ -59,20 +60,29 @@ commands:
   - name: aiflow rename
     description: Rename an AIFlow
     args: FLOW_ID NEW_NAME
-  - name: aiflow pitch show
-    description: Show the 6-section pitch saved for an AIFlow
+  - name: aiflow pitch-show
+    description: Show the pitch ICP snapshot for an AIFlow (GET /api/v1/ai/workflow/get/pitch/{id}). Returns the targeting DTO (activeSignals, icpDescription, dataCount, ...), not the literal 6-section pitch text that was submitted.
     args: FLOW_ID
-  - name: aiflow pitch init
-    description: Write a local pitch.json scaffold (6 sections + optional url/language) ready to edit and pass to `aiflow create --pitch-file`. No network call.
-    args: --out PATH --force
-    examples:
-      - aiflow pitch init --out ./pitch.json
-      - aiflow pitch init --out ./pitch.json --force
   - name: aiflow test-connection
-    description: Test whether a company website URL is reachable for pitch generation
-    args: URL
-  - name: aiflow template
-    description: Show the default email-sequence time template
+    description: Probe a URL + preview LLM-generated pitch (POST /api/v1/ai/workflow/test/connection). Response is the exact DTO the create wizard forwards to /save/pitch.
+    args: URL --language en-us
+  - name: aiflow draft
+    description: Show the current user's most recent DRAFT AIFlow (read-only; no resume support — each `aiflow create` builds a brand-new flow).
+  - name: aiflow setting-show
+    description: Show settings + AI-reply defaults for an AIFlow (GET /api/v1/ai/workflow/get/setting/{id}). Source of truth for agentPromptList / emailTrack / enableAgentReply / agentStrategy defaults used by /save/setting on launch.
+    args: FLOW_ID
+  - name: aiflow pitch-update
+    description: Regenerate + overwrite an existing AIFlow's pitch (test/connection → save/pitch).
+    args: FLOW_ID --url URL --language en-us
+  - name: aiflow prompt-show
+    description: Show saved emailContent prompt template per step. Uses /get/email/prompt short-circuit path (workflowStepId -> saved value). --full prints entire template.
+    args: FLOW_ID --step N --full
+  - name: aiflow prompt-update
+    description: Replace the full step list of an AIFlow from a JSON file (POST /save/prompt). Warning - REPLACE operation - backend deletes existing steps not in the uploaded list.
+    args: FLOW_ID --file prompts.json
+  - name: aiflow settings-update
+    description: Patch launch-time settings of an AIFlow (time template / mailboxes / autoApprove / enableAgentReply / agentStrategy). Fetches /get/setting first then merges flags + POST /save/setting.
+    args: FLOW_ID --time-template-id N --mailboxes MODE --auto-approve/--no-auto-approve --enable-agent-reply/--no-enable-agent-reply --agent-strategy STRATEGY
   - name: token balance
     description: Show token balance derived from data.limit.{tokenTotal, tokenCost} of /api/v2/oauth/me
   - name: token check
@@ -82,9 +92,16 @@ commands:
     description: List bound mailboxes from mailsvc
     args: --status S --warmup W
   - name: mailboxes bind-list
-    description: Show mailboxes currently bound to the AIFlow account
+    description: Show the mailbox pool bound to an AIFlow
+    args: FLOW_ID
+  - name: mailboxes unbind-list
+    description: Show the mailboxes an AIFlow is actively using (currently-active set)
+    args: FLOW_ID
   - name: mailboxes has-active
     description: Check whether the current account has any active mailbox
+  - name: meetings list
+    description: List personal meeting routers (POST /meeting/api/v1/meeting/personal/list). The create wizard picks meetings[0].id as Book Meeting's meetingRouteId.
+    args: --name NAME --type TYPE
   - name: health
     description: Check connectivity to auth-gateway-svc (no API Key required)
 ---
@@ -100,7 +117,7 @@ CLI --[X-API-Key: sk_xxx]-> auth-gateway-svc --[Bearer+X-Auth-Company]-> FlashRe
 
 The gateway dispatches by path prefix; the CLI does not know which upstream owns which prefix:
 
-- `{discover_prefix}` (default `/flashrev`) — user / company info, AIFlow CRUD, pitch, default time template
+- `{discover_prefix}` (default `/flashrev`) — user / company info, AIFlow CRUD, pitch, mailbox binding queries
 - `/engage` — mailbox pool detail, sequence
 - `/mailsvc` — bound mailbox listing
 

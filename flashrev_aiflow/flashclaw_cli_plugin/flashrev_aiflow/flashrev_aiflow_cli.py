@@ -28,6 +28,7 @@ from flashclaw_cli_plugin.flashrev_aiflow.core.session import (
     get_discover_prefix,
     get_engage_prefix,
     get_mailsvc_prefix,
+    get_meeting_prefix,  # noqa: F401  — formatter keeps stripping this; pinned.
     load_config,
     save_config,
     set_api_key,
@@ -38,16 +39,6 @@ from flashclaw_cli_plugin.flashrev_aiflow.utils.output import (
     emit_error,
     set_json_mode,
 )
-
-# Endpoints listed in the PRD but NOT present in the search-website frontend.
-# Implementations are blocked until the user confirms the right project /
-# endpoint; the CLI reports this clearly instead of silently failing.
-_NOT_CONFIRMED_MSG = (
-    "Endpoint not verified in the search-website frontend yet. "
-    "Please confirm the owning project and the real API path before this "
-    "command can be wired up."
-)
-
 
 def _build_client() -> FlashrevAiflowClient:
     return FlashrevAiflowClient(base_url=get_base_url(), api_key=get_api_key())
@@ -200,6 +191,7 @@ def auth_status():
         "discover_prefix": get_discover_prefix(),
         "engage_prefix": get_engage_prefix(),
         "mailsvc_prefix": get_mailsvc_prefix(),
+        "meeting_prefix": get_meeting_prefix(),
     }
     if key:
         payload["key_prefix"] = key[:10] + "****"
@@ -241,6 +233,7 @@ def config_set(key, value):
       discover_prefix    Gateway route prefix for discover-api (default /flashrev)
       engage_prefix      Gateway route prefix for engage-api  (default '')
       mailsvc_prefix     Gateway route prefix for mailsvc     (default '')
+      meeting_prefix     Gateway route prefix for meeting-svc (default /meeting)
 
     \b
     Examples:
@@ -408,137 +401,510 @@ def aiflow_rename(flow_id, new_name):
     emit(result)
 
 
-@aiflow.group("pitch")
-def aiflow_pitch():
-    """Pitch content for an AIFlow.
-
-    \b
-    Subcommands:
-      show FLOW_ID      Fetch the saved 6-section pitch for an AIFlow.
-      init [--out PATH] Emit a local pitch.json scaffold to edit + pass
-                        to `aiflow create --pitch-file`.
-    """
-
-
-@aiflow_pitch.command("show")
+@aiflow.command("pitch-show")
 @click.argument("flow_id")
 def aiflow_pitch_show(flow_id):
-    """Show the 6-section pitch saved for a given AIFlow.
+    """Show the pitch ICP snapshot saved for a given AIFlow.
 
-    Calls: GET /api/v1/ai/workflow/agent/get/pitch?flowId=...
+    Calls: GET /api/v1/ai/workflow/get/pitch/{flowId}
+
+    NOTE: the backend response is the ICP / targeting DTO (activeSignals,
+    icpDescription, dataCount, ...), not a literal read-back of the 6
+    sections that were submitted via /save/pitch. Use `aiflow setting show`
+    or dig into the DB if you need the raw pitch text.
     """
     _require_api_key()
     client = _build_client()
     result = _safe_call(
-        lambda: client.get_pitch({"flowId": flow_id}),
+        lambda: client.get_pitch(flow_id),
         code="AIFLOW_PITCH_FAILED",
     )
     emit(result)
 
 
-@aiflow_pitch.command("init")
-@click.option("--out", "out_path", default="pitch.json", show_default=True,
-              help="Output file path.")
-@click.option("--force", is_flag=True,
-              help="Overwrite the file if it already exists.")
-def aiflow_pitch_init(out_path, force):
-    """Emit a pitch.json scaffold (no network call).
-
-    Writes a ready-to-edit JSON file with the 6 required pitch sections
-    (officialDescription + painPoints / solutions / proofPoints /
-    callToActions / leadMagnets) plus optional url and language fields.
-
-    \b
-    Example:
-      flashclaw-cli-plugin-flashrev-aiflow aiflow pitch init --out ./my-pitch.json
-      # edit ./my-pitch.json
-      flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard \\
-          --csv ./contacts.csv --pitch-file ./my-pitch.json \\
-          --country-column country --dry-run
-    """
-    from pathlib import Path
-
-    path = Path(out_path).expanduser()
-    if path.exists() and not force:
-        emit_error(
-            f"Refusing to overwrite existing file: {path}. "
-            "Use --force to overwrite.",
-            code="PITCH_INIT_FILE_EXISTS",
-            details={"path": str(path.resolve())},
-        )
-    scaffold = _pitch_scaffold()
-    path.write_text(
-        json.dumps(scaffold, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    emit({
-        "ok": True,
-        "path": str(path.resolve()),
-        "sections": list(scaffold.keys()),
-    })
-
-
-def _pitch_scaffold() -> dict:
-    """Default pitch JSON scaffold. Kept in sync with examples/pitch.example.json."""
-    return {
-        "officialDescription": (
-            "One-sentence value proposition describing what your company does "
-            "and why it matters to buyers."
-        ),
-        "painPoints": [
-            "First specific pain your customers feel (keep each bullet short and concrete)",
-            "Second pain point",
-        ],
-        "solutions": [
-            "How your product solves the first pain",
-            "How it solves the second",
-        ],
-        "proofPoints": [
-            "Customer testimonial or case-study one-liner",
-            "Notable metric you have achieved (e.g. 30% lift, 2x ROI)",
-        ],
-        "callToActions": [
-            "Book a 15-minute demo",
-            "Download the one-page ROI brief",
-        ],
-        "leadMagnets": [
-            "Free audit of the prospect's current setup",
-            "Template / checklist / ROI calculator",
-        ],
-        "url": "acme.com",
-        "language": "en",
-    }
-
-
 @aiflow.command("test-connection")
 @click.argument("url")
-def aiflow_test_connection(url):
-    """Test whether a company website URL is reachable for pitch generation.
+@click.option("--language", default="en-us", show_default=True,
+              help="Language code to pass to the LLM pitch generator "
+                   "(e.g. en-us, ja, fr). Stored on the flow for later "
+                   "use; can be 'auto' to defer to per-contact detection.")
+def aiflow_test_connection(url, language):
+    """Probe a company website + get an AI-generated pitch preview.
 
-    Calls: POST /api/v1/ai/workflow/agent/test/connection  (timeout 20s)
+    Calls: POST /api/v1/ai/workflow/test/connection (timeout 20s)
+
+    The response is the exact DTO that `aiflow create` forwards into
+    /save/pitch — use this command to preview what the LLM would generate
+    from a URL before committing to a full create.
     """
     _require_api_key()
     client = _build_client()
     result = _safe_call(
-        lambda: client.test_website_connection(url),
+        lambda: client.test_website_connection(url, language),
         code="AIFLOW_TEST_CONNECTION_FAILED",
     )
     emit(result)
 
 
-@aiflow.command("template")
-def aiflow_template():
-    """Show the default email-sequence time template.
+@aiflow.command("draft")
+def aiflow_draft():
+    """Show the current user's most recent DRAFT AIFlow (read-only).
 
-    Calls: GET /api/v1/ai/workflow/agent/get/time/template
+    Calls: GET /api/v1/ai/workflow/draft
+
+    Intentionally read-only: the CLI does NOT support resuming a draft.
+    Every `aiflow create` run builds a brand-new flow — this matches the
+    PRD intent ("each run is new"). Use this command only to inspect
+    what's sitting around in draft state (e.g. to decide whether to
+    clean up via `aiflow delete <id>` before a fresh create).
     """
     _require_api_key()
     client = _build_client()
     result = _safe_call(
-        lambda: client.get_time_template(),
-        code="AIFLOW_TEMPLATE_FAILED",
+        lambda: client.get_draft_workflow(),
+        code="AIFLOW_DRAFT_FAILED",
     )
     emit(result)
+
+
+@aiflow.command("setting-show")
+@click.argument("flow_id")
+def aiflow_setting_show(flow_id):
+    """Show the settings / AI-reply defaults for an AIFlow.
+
+    Calls: GET /api/v1/ai/workflow/get/setting/{flowId}
+
+    This is the source of truth for `save/setting`'s agentPromptList,
+    emailTrack, enableAgentReply, agentStrategy defaults. Frontend reads
+    the same endpoint on the settings page (settings.vue:485) and the
+    AIFlow create wizard uses it in the launch branch.
+    """
+    _require_api_key()
+    client = _build_client()
+    result = _safe_call(
+        lambda: client.get_setting(flow_id),
+        code="AIFLOW_SETTING_SHOW_FAILED",
+    )
+    emit(result)
+
+
+# ═══════════════════════════════════════════════════════════
+# Post-create edits (update pitch / prompts / settings)
+# ═══════════════════════════════════════════════════════════
+
+@aiflow.command("pitch-update")
+@click.argument("flow_id")
+@click.option("--url", "url", required=True,
+              help="Company website URL to regenerate the pitch from (LLM "
+                   "runs on /test/connection, result is written to "
+                   "/save/pitch for this FLOW_ID).")
+@click.option("--language", default="en-us", show_default=True,
+              help="Language code forwarded to /test/connection "
+                   "(e.g. en-us, ja, fr). Pass 'auto' for per-contact "
+                   "detection (sets useConfigLanguage=true).")
+def aiflow_pitch_update(flow_id, url, language):
+    """Regenerate + overwrite the pitch of an existing AIFlow.
+
+    \b
+    Pipeline:
+      1. POST /api/v1/ai/workflow/test/connection {url, language}
+         -> LLM-generated ICP DTO
+      2. POST /api/v1/ai/workflow/save/pitch
+         -> upsert t_ai_workflow_pitch WHERE workflowId = FLOW_ID
+
+    This replaces whatever pitch was previously saved. Use it when the
+    company URL changes, or when you want to force a new LLM generation
+    pass for an existing flow.
+    """
+    from flashclaw_cli_plugin.flashrev_aiflow import wizard
+
+    _require_api_key()
+    client = _build_client()
+
+    test_conn_lang = language if language != "auto" else "en-us"
+    click.echo(
+        f"  Regenerating pitch for flow {flow_id} via test/connection "
+        f"(url={url}, language={test_conn_lang}) ..."
+    )
+    test_resp = _safe_call(
+        lambda: client.test_website_connection(url, test_conn_lang),
+        code="PITCH_GENERATION_FAILED",
+    )
+    pitch_data = (test_resp or {}).get("data") or {}
+    if not pitch_data.get("officialDescription"):
+        click.echo(
+            "  ! test/connection returned no officialDescription — saving "
+            "anyway (pitch fields may be mostly empty).",
+            err=True,
+        )
+
+    save_body = wizard.build_save_pitch_body(
+        flow_id, pitch_data, url, language,
+    )
+    save_resp = _safe_call(
+        lambda: client.save_pitch(save_body),
+        code="PITCH_SAVE_FAILED",
+    )
+    click.echo("  Pitch overwritten.")
+    emit({
+        "flowId": flow_id,
+        "url": save_body.get("url"),
+        "language": language,
+        "useConfigLanguage": save_body.get("useConfigLanguage"),
+        "officialDescription": (pitch_data.get("officialDescription") or "")[:160],
+        "painPoints":    len(pitch_data.get("painPoints") or []),
+        "solutions":     len(pitch_data.get("solutions") or []),
+        "proofPoints":   len(pitch_data.get("proofPoints") or []),
+        "callToActions": len(pitch_data.get("callToActions") or []),
+        "leadMagnets":   len(pitch_data.get("leadMagnets") or []),
+        "saveResponse":  save_resp,
+    })
+
+
+@aiflow.command("prompt-show")
+@click.argument("flow_id")
+@click.option("--step", "step_filter", type=int, default=None,
+              help="Only show one step by 1-based index (default: all).")
+@click.option("--full", is_flag=True,
+              help="Print the full emailContent prompt template. Default "
+                   "shows just the first 200 chars per step.")
+def aiflow_prompt_show(flow_id, step_filter, full):
+    """Show the saved email-prompt content for each step of an AIFlow.
+
+    \b
+    Per step, reads:
+      - step / delayMinutes / workflowStepId       from /get/prompt
+      - emailContent (LLM prompt template)         from /get/email/prompt
+        (short-circuits to the saved row when workflowStepId is supplied)
+
+    subject / content sample previews are NOT read back — the backend
+    does not expose them on a stable endpoint and the ``/get/email``
+    generator is 504-prone. If you need to inspect what was saved for
+    those fields, dump the full /save/prompt body the wizard sent
+    (--json mode) at create time.
+    """
+    _require_api_key()
+    client = _build_client()
+
+    raw = _safe_call(
+        lambda: client.get_workflow_prompt(flow_id),
+        code="PROMPT_SHOW_FAILED",
+    )
+    steps = _load_prompt_steps(raw)
+    if step_filter is not None:
+        steps = [s for s in steps if (s.get("step") or _step_index_of(s, steps)) == step_filter]
+        if not steps:
+            emit_error(
+                f"--step {step_filter} out of range "
+                f"(flow has {len(_load_prompt_steps(raw))} step(s))",
+                code="PROMPT_STEP_OUT_OF_RANGE",
+            )
+
+    out = []
+    import requests as _requests
+    url = client._url_discover("/api/v1/ai/workflow/get/email/prompt")
+    for i, s in enumerate(steps, 1):
+        step_id = s.get("workflowStepId") or s.get("id")
+        entry = {
+            "step":           s.get("step") or i,
+            "workflowStepId": step_id,
+            "delayMinutes":   s.get("delayMinutes"),
+        }
+        # Fetch saved emailContent via short-circuit path (workflowStepId set).
+        try:
+            resp = _requests.post(
+                url,
+                json={"workflowId": flow_id, "workflowStepId": step_id,
+                      "beforStep": []},
+                headers=client._headers(),
+                timeout=60,
+            )
+            from flashclaw_cli_plugin.flashrev_aiflow import wizard
+            content = wizard._parse_sse_content(resp.text)
+        except Exception as e:  # noqa: BLE001
+            content = ""
+            entry["error"] = str(e)
+        entry["emailContentLength"] = len(content)
+        entry["emailContent"] = content if full else content[:200] + (
+            "..." if len(content) > 200 else ""
+        )
+        out.append(entry)
+    emit(out)
+
+
+def _load_prompt_steps(raw_response):
+    from flashclaw_cli_plugin.flashrev_aiflow import wizard
+    return wizard.extract_prompt_steps(raw_response)
+
+
+def _step_index_of(step, steps):
+    """Fallback step index for rows whose `step` field is null (the
+    sequence_step response sometimes omits it; index by position)."""
+    try:
+        return steps.index(step) + 1
+    except ValueError:
+        return -1
+
+
+@aiflow.command("prompt-update")
+@click.argument("flow_id")
+@click.option("--file", "prompt_file", required=True,
+              help="JSON file containing a list of prompt objects. Shape: "
+                   "[{step, delayMinutes, emailSubject, emailContent, "
+                   "subject, content, workflowStepId?}, ...]. "
+                   "Use `aiflow prompt-show --full` + redirect to JSON as a "
+                   "starting point.")
+def aiflow_prompt_update(flow_id, prompt_file):
+    """Replace the full step list of an AIFlow with the content of FILE.
+
+    \b
+    Calls: POST /api/v1/ai/workflow/save/prompt with the loaded array.
+
+    WARNING: this is a REPLACE operation. The backend deletes any existing
+    step row whose workflowStepId is NOT in the uploaded list (see dubbo
+    AiWorkFlowServiceImpl.savePrompt line ~1577-1586). To edit one step
+    without losing the others, start from a `prompt-show --full` dump and
+    modify the entry you care about before uploading.
+
+    Each prompt object accepts:
+      workflowStepId    optional  existing row id (pass to UPDATE in place;
+                                  omit to INSERT a new row)
+      step              required  1-based position
+      stepType          optional  defaults to "Email"
+      delayMinutes      required  minutes after prior step (e.g. 60 / 4320 / 10080)
+      emailSubject      string    LLM prompt template for subject (usually "")
+      emailContent      string    LLM prompt template for body (the critical one)
+      subject           string    sample subject (empty on step 1/3 by convention)
+      content           string    sample body
+    """
+    from pathlib import Path
+
+    _require_api_key()
+    client = _build_client()
+
+    path = Path(prompt_file).expanduser()
+    if not path.exists():
+        emit_error(
+            f"--file not found: {path}",
+            code="PROMPT_FILE_NOT_FOUND",
+        )
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        emit_error(
+            f"--file is not valid JSON: {e}",
+            code="PROMPT_FILE_INVALID_JSON",
+        )
+
+    if not isinstance(parsed, list) or not parsed:
+        emit_error(
+            "--file must be a non-empty JSON array of prompt objects",
+            code="PROMPT_FILE_SHAPE_ERROR",
+            details={"parsedType": type(parsed).__name__},
+        )
+
+    for i, p in enumerate(parsed, 1):
+        if not isinstance(p, dict):
+            emit_error(
+                f"--file[{i}] is not an object",
+                code="PROMPT_FILE_ENTRY_NOT_OBJECT",
+            )
+        if "delayMinutes" not in p or not isinstance(p["delayMinutes"], int):
+            emit_error(
+                f"--file[{i}] missing required int `delayMinutes`",
+                code="PROMPT_FILE_MISSING_DELAY",
+            )
+
+    result = _safe_call(
+        lambda: client.save_prompt(flow_id, parsed),
+        code="PROMPT_SAVE_FAILED",
+    )
+    click.echo(
+        f"  Saved {len(parsed)} step(s) via /save/prompt."
+    )
+    emit({
+        "flowId": flow_id,
+        "stepsSaved": len(parsed),
+        "saveResponse": result,
+    })
+
+
+@aiflow.command("settings-update")
+@click.argument("flow_id")
+@click.option("--time-template-id", "time_template_id", type=int, default=None,
+              help="Override timeTemplateId. The CLI fetches the matching "
+                   "entry from /engage/api/v1/time/template/list and "
+                   "embeds its timeBlocks / properties as timeTemplateConfig.")
+@click.option("--mailboxes", "mailbox_mode", default=None,
+              help="'all-active' or a comma-separated list of mailbox ids "
+                   "to bind as sequenceMailboxList.")
+@click.option("--auto-approve/--no-auto-approve", "auto_approve",
+              default=None,
+              help="Override autoApprove. Omitted flag = keep current value.")
+@click.option("--enable-agent-reply/--no-enable-agent-reply",
+              "enable_agent_reply", default=None,
+              help="Override enableAgentReply. Omitted flag = keep current.")
+@click.option("--agent-strategy", "agent_strategy", default=None,
+              type=click.Choice(
+                  ["Book Meeting", "Drive Traffic",
+                   "Qualify Lead", "Custom Goal"],
+                  case_sensitive=False),
+              help="Override agentStrategy. Omitted flag = keep current.")
+def aiflow_settings_update(
+    flow_id, time_template_id, mailbox_mode, auto_approve,
+    enable_agent_reply, agent_strategy,
+):
+    """Patch launch-time settings of an AIFlow (time template, mailboxes,
+    auto-approve, AI-reply toggles).
+
+    \b
+    Pipeline:
+      1. GET  /api/v1/ai/workflow/get/setting/{flowId}
+         -> current agentPromptList / emailTrack / enableAgentReply / ...
+      2. [--time-template-id] GET /engage/api/v1/time/template/list
+         -> pick the matching template to rebuild timeTemplateConfig
+      3. [--mailboxes] GET /mailsvc/mail-address/simple/v2/list
+         -> filter to selected mailbox ids for sequenceMailboxList
+      4. POST /api/v1/ai/workflow/save/setting
+         -> persist the merged body
+
+    Flags you omit preserve the current server-side value. agentPromptList
+    and emailTrack always pass through unchanged (not editable via CLI).
+    """
+    from flashclaw_cli_plugin.flashrev_aiflow import wizard
+
+    if all(v is None for v in (time_template_id, mailbox_mode, auto_approve,
+                               enable_agent_reply, agent_strategy)):
+        emit_error(
+            "At least one of --time-template-id / --mailboxes / "
+            "--auto-approve / --enable-agent-reply / --agent-strategy "
+            "must be provided",
+            code="USAGE_NO_SETTING_UPDATE",
+        )
+
+    _require_api_key()
+    client = _build_client()
+
+    # 1) Read current setting.
+    setting_resp = _safe_call(
+        lambda: client.get_setting(flow_id),
+        code="AIFLOW_GET_SETTING_FAILED",
+    )
+    setting = (setting_resp or {}).get("data") or setting_resp or {}
+
+    # 2) Resolve time template override OR reuse the existing one.
+    #    /get/setting returns `properties` at the top level of `data` (only
+    #    populated for flows with a sequenceId; DRAFT flows have none).
+    existing_props = setting.get("properties") or {}
+    if time_template_id is not None:
+        templates_resp = _safe_call(
+            lambda: client.list_time_templates(),
+            code="TIME_TEMPLATE_LIST_FAILED",
+        )
+        items = (templates_resp or {}).get("data") or []
+        match = next((t for t in items if t.get("id") == time_template_id), None)
+        if match is None:
+            emit_error(
+                f"--time-template-id {time_template_id} not found "
+                "in /engage/api/v1/time/template/list",
+                code="TIME_TEMPLATE_NOT_FOUND",
+                details={"availableIds": [t.get("id") for t in items]},
+            )
+        time_template = match
+    else:
+        # Keep whatever the server currently has — build_save_setting_body
+        # will detect existing_props.timeTemplateConfig and reuse it.
+        time_template = {}
+
+    # 3) Resolve mailbox override OR reuse existing.
+    if mailbox_mode is not None:
+        mailboxes_resp = _safe_call(
+            lambda: client.list_mailboxes(),
+            code="MAILBOXES_LIST_FAILED",
+        )
+        active = wizard.filter_active_mailboxes(mailboxes_resp)
+        if mailbox_mode == "all-active":
+            sequence_list = [
+                {"addressId": wizard.mailbox_id(mb)}
+                for mb in active if wizard.mailbox_id(mb)
+            ]
+        else:
+            wanted = {p.strip() for p in mailbox_mode.split(",") if p.strip()}
+            sequence_list = [
+                {"addressId": wizard.mailbox_id(mb)}
+                for mb in active
+                if str(wizard.mailbox_id(mb)) in wanted
+                or wizard.mailbox_id(mb) in wanted
+            ]
+            if not sequence_list:
+                emit_error(
+                    "--mailboxes did not match any active mailbox.",
+                    code="USAGE_MAILBOX_NO_MATCH",
+                    details={
+                        "requested": sorted(wanted),
+                        "availableIds": [
+                            wizard.mailbox_id(mb) for mb in active
+                            if wizard.mailbox_id(mb)
+                        ],
+                    },
+                )
+    else:
+        sequence_list = existing_props.get("sequenceMailboxList") or []
+
+    # 4) autoApprove: flag wins, else keep current.
+    effective_auto_approve = (
+        auto_approve if auto_approve is not None
+        else bool(setting.get("autoApprove"))
+    )
+
+    # 5) Auto-patch Book Meeting meetingRouteId when the flow has AI
+    #    reply enabled but no router is bound yet (commonly the case for
+    #    flows created with --no-launch where the create wizard skipped
+    #    the meeting-list step). Mirrors the create wizard's launch
+    #    branch — fetches the user's first personal meeting router.
+    meeting_router_id = None
+    if setting.get("isShowAiReply"):
+        agent_prompt_list = setting.get("agentPromptList") or []
+        bm = next(
+            (e for e in agent_prompt_list
+             if e.get("strategy") == "Book Meeting"),
+            None,
+        )
+        if bm is not None and not bm.get("meetingRouteId"):
+            meetings_resp = _safe_call(
+                lambda: client.list_personal_meetings(),
+                code="MEETING_LIST_FAILED",
+            )
+            meeting_router_id = wizard.pick_first_meeting_router_id(
+                meetings_resp
+            )
+
+    # 6) Assemble body (reuses the same helper the create wizard uses).
+    save_body = wizard.build_save_setting_body(
+        flow_id,
+        time_template,
+        sequence_list,
+        setting,
+        effective_auto_approve,
+        enable_agent_reply=enable_agent_reply,
+        agent_strategy=agent_strategy,
+        meeting_router_id=meeting_router_id,
+    )
+
+    result = _safe_call(
+        lambda: client.save_setting(save_body),
+        code="AIFLOW_SETTINGS_UPDATE_FAILED",
+    )
+    click.echo("  Settings updated.")
+    emit({
+        "flowId": flow_id,
+        "timeTemplateId": save_body["properties"].get("timeTemplateId"),
+        "sequenceMailboxCount": len(sequence_list),
+        "autoApprove": save_body.get("autoApprove"),
+        "enableAgentReply": save_body.get("enableAgentReply"),
+        "agentStrategy": save_body.get("agentStrategy"),
+        "saveResponse": result,
+    })
 
 
 @aiflow.command("create")
@@ -547,63 +913,94 @@ def aiflow_template():
                    "All required fields must be supplied as flags.")
 @click.option("--dry-run", is_flag=True,
               help="Validate inputs and probe read-only endpoints "
-                   "(token balance + mailbox list); skip all write operations "
-                   "(upload / create / save_pitch / save_email_config / launch). "
+                   "(token balance + mailbox list + test/connection); "
+                   "skip every write endpoint (upload / create/list / "
+                   "save/pitch / get/prompt / save/prompt / save/setting). "
                    "No side effects on the backend.")
 @click.option("--csv", "csv_path", default=None,
               help="Path to a local CSV file (email column required).")
 @click.option("--sheet", "sheet_url", default=None,
               help="Public Google Sheet URL (shared as 'Anyone with the "
                    "link -> Viewer').")
-@click.option("--website", default=None,
-              help="Company website URL (for the pitch). May be omitted if "
-                   "the --pitch-file contains a top-level 'url' field.")
-@click.option("--pitch-file", "pitch_file", default=None,
-              help="JSON file with the 6-section pitch payload. Required in "
-                   "--no-wizard mode (interactive editor is disabled there).")
-@click.option("--language", default="auto", show_default=True,
-              help="Pitch language; 'auto' lets the backend infer per contact.")
+@click.option("--url", "--website", "url",
+              default=None,
+              help="Company website URL. Required in --no-wizard mode. "
+                   "Pitch content is LLM-generated by POST /test/connection "
+                   "from this URL, then written to /save/pitch — there is no "
+                   "local pitch.json input any more.")
+@click.option("--language", default="en-us", show_default=True,
+              help="Pitch language code forwarded to /test/connection "
+                   "(e.g. en-us, ja, fr). Pass 'auto' to let the backend "
+                   "infer language per contact (sets useConfigLanguage=true).")
 @click.option("--country-column", "country_column", default=None,
               help="CSV column name carrying the contact country/region "
                    "(or 'none' to skip). Required in --no-wizard mode when "
                    "--language=auto.")
-@click.option("--email-rounds", "email_rounds", default=2, type=int,
-              show_default=True, help="Emails per contact (1-5).")
+@click.option("--regenerate-emails", "regenerate_emails", is_flag=True,
+              help="Run the per-step LLM pass (POST /get/email/prompt + "
+                   "POST /get/email) to fill in emailSubject / emailContent / "
+                   "subject / content for each step before /save/prompt. "
+                   "Without this flag the wizard only runs /get/prompt (which "
+                   "seeds empty step rows); launching will then be blocked by "
+                   "a completeness check unless every step already has "
+                   "non-empty content. Costs tokens — one /get/email per step.")
 @click.option("--mailboxes", "mailbox_mode", default="all-active",
               show_default=True,
               help="'all-active' to pick every active mailbox, or a comma-"
                    "separated list of mailbox ids.")
 @click.option("--auto-approve/--no-auto-approve", "auto_approve",
               default=True, show_default=True,
-              help="autoApprove flag on the saved email config.")
+              help="autoApprove flag sent to /save/setting on launch.")
+@click.option("--enable-agent-reply/--no-enable-agent-reply",
+              "enable_agent_reply", default=None,
+              help="Override enableAgentReply in the /save/setting body. "
+                   "Default: inherit whatever /get/setting returned.")
+@click.option("--agent-strategy", "agent_strategy", default=None,
+              type=click.Choice(
+                  ["Book Meeting", "Drive Traffic",
+                   "Qualify Lead", "Custom Goal"],
+                  case_sensitive=False),
+              help="Override agentStrategy in the /save/setting body. "
+                   "Default: inherit whatever /get/setting returned.")
 @click.option("--launch/--no-launch", "launch_now", default=None,
               help="Launch the AIFlow after save. In --no-wizard mode, "
                    "defaults to --no-launch (save as draft) unless --launch "
-                   "is passed.")
+                   "is passed. Launch is blocked when prompts are incomplete; "
+                   "use --regenerate-emails to fill them in first.")
 @click.option("-y", "--yes", is_flag=True,
               help="Skip the final confirmation prompt.")
 @click.option("--force", is_flag=True,
               help="Skip CLI-side token balance check before launch.")
 def aiflow_create(
-    no_wizard, dry_run, csv_path, sheet_url, website, pitch_file, language,
-    country_column, email_rounds, mailbox_mode, auto_approve, launch_now,
-    yes, force,
+    no_wizard, dry_run, csv_path, sheet_url, url, language,
+    country_column, regenerate_emails, mailbox_mode, auto_approve,
+    enable_agent_reply, agent_strategy, launch_now, yes, force,
 ):
-    """Create a new AIFlow (Strategy -> AIFlow -> Settings -> Launch).
+    """Create a **new** AIFlow (Strategy -> AIFlow -> Settings -> Launch).
 
-    Pipeline (all via auth-gateway-svc /flashrev):
+    \b
+    Pipeline (all via auth-gateway-svc):
+      1. POST {discover}/contacts/upload       -> {listId, listName}
+      2. POST {discover}/create/list           -> {flowId}   (NEW flow)
+      3. POST {discover}/test/connection       -> LLM-generated pitch DTO
+      4. POST {discover}/save/pitch            -> persist pitch
+      5. POST {discover}/get/prompt            -> seed default step rows
+      6. [--regenerate-emails]
+         POST {discover}/get/email/prompt      per-step, with beforStep ctx
+         POST {discover}/get/email             per-step, LLM subject+content
+      7. POST {discover}/save/prompt           -> persist step prompts
+      8. [--launch]
+         GET  {discover}/get/setting/{flowId}  -> agentPromptList/emailTrack defaults
+         GET  {engage}/api/v1/time/template/list
+                                                -> pick timeTemplateConfig
+         POST {meeting}/api/v1/meeting/personal/list
+                                                -> first id -> Book Meeting
+         POST {discover}/save/setting          -> persist settings + DRAFT -> ACTIVE
 
-      1. POST /api/v1/ai/workflow/contacts/upload    -> {listId, listName}
-      2. POST /api/v1/ai/workflow/create/list        -> {flowId}
-      3. POST /api/v1/ai/workflow/save/pitch         -> save 6-section pitch
-      4. GET  /api/v1/ai/workflow/agent/get/time/template (preview only)
-      5. POST /api/v1/ai/workflow/agent/get/email/config  (load current)
-      6. POST /api/v1/ai/workflow/agent/save/email/config (save with edits)
-      7. GET  /api/v1/ai/workflow/agent/sequence/status/{flowId}/ACTIVE  (launch)
-
-    Wizard mode (default) prompts for missing fields. --no-wizard makes every
-    missing field an error (CI/script-friendly). --dry-run validates inputs
-    and probes read-only endpoints without making any write calls.
+    **Every run creates a brand-new flow** — there is no resume mode. If
+    you already have a DRAFT you want to throw away, delete it first:
+        aiflow draft        # inspect
+        aiflow delete <id>  # clean up
     """
     _require_api_key()
     client = _build_client()
@@ -611,13 +1008,14 @@ def aiflow_create(
         client,
         csv_path=csv_path,
         sheet_url=sheet_url,
-        website=website,
-        pitch_file=pitch_file,
+        url=url,
         language=language,
         country_column=country_column,
-        email_rounds=email_rounds,
+        regenerate_emails=regenerate_emails,
         mailbox_mode=mailbox_mode,
         auto_approve=auto_approve,
+        enable_agent_reply=enable_agent_reply,
+        agent_strategy=agent_strategy,
         launch_now=launch_now,
         yes=yes,
         force=force,
@@ -631,30 +1029,37 @@ def _run_create_wizard(
     *,
     csv_path=None,
     sheet_url=None,
-    website=None,
-    pitch_file=None,
-    language="auto",
+    url=None,
+    language="en-us",
     country_column=None,
-    email_rounds=2,
+    regenerate_emails=False,
     mailbox_mode="all-active",
     auto_approve=True,
+    enable_agent_reply=None,
+    agent_strategy=None,
     launch_now=None,
     yes=False,
     force=False,
     interactive=True,
     dry_run=False,
 ):
-    """Drive the Strategy -> AIFlow -> Settings -> Launch pipeline.
+    """Drive the V2 create pipeline (see aiflow_create docstring).
 
     interactive=True : prompt for missing fields (wizard mode).
     interactive=False: raise USAGE_* errors for missing fields (--no-wizard).
-    dry_run=True     : perform local validation + read-only probes only; skip
-                       every write endpoint (upload / create / save_pitch /
-                       save_email_config / launch).
+    dry_run=True     : run only local validation + read-only probes.
+    regenerate_emails=True: run per-step /get/email/prompt + /get/email so
+                            every step lands with full content. Default False
+                            (empty emailSubject / emailContent; launch will
+                            be blocked by the completeness gate).
     """
     from flashclaw_cli_plugin.flashrev_aiflow import wizard
 
     header = "Dry-run " if dry_run else ""
+    click.secho(
+        f"{header}Creating a NEW AIFlow (existing drafts are not reused).",
+        fg="yellow",
+    )
 
     # ── Pre-flight checks (non-interactive mode) ───────────────────
     if not interactive:
@@ -663,11 +1068,11 @@ def _run_create_wizard(
                 "--no-wizard requires exactly one of --csv or --sheet",
                 code="USAGE_CONTACT_SOURCE",
             )
-        if not pitch_file:
+        if not url:
             emit_error(
-                "--no-wizard requires --pitch-file (the interactive pitch "
-                "editor is disabled in this mode)",
-                code="USAGE_PITCH_FILE_REQUIRED",
+                "--no-wizard requires --url (company website URL; pitch "
+                "content is LLM-generated from it)",
+                code="USAGE_URL_REQUIRED",
             )
     # Even in wizard mode, simultaneous csv+sheet is a conflict.
     if csv_path and sheet_url:
@@ -748,41 +1153,19 @@ def _run_create_wizard(
                 code="USAGE_COUNTRY_COLUMN_MISSING",
             )
 
-    # ── 1c. Pitch + website (resolve URL first, allowing pitch file to supply it) ─
-    pitch_payload = None
-    if pitch_file:
-        pitch_payload = _safe_call(
-            lambda: wizard.load_pitch_file(pitch_file),
-            code="PITCH_FILE_INVALID",
-        )
-
-    if not website and pitch_payload and pitch_payload.get("url"):
-        website = pitch_payload["url"]
-
-    if not website:
+    # ── 1c. URL (prompt for it in wizard mode) ──────────────
+    if not url:
         if interactive:
-            website = click.prompt(
+            url = click.prompt(
                 "  Company website URL (with or without https://)"
             ).strip()
-        else:
-            emit_error(
-                "--website is required (or include a top-level 'url' in "
-                "--pitch-file)",
-                code="USAGE_WEBSITE_MISSING",
-            )
+        # non-interactive already errored out above
 
-    website_normalised = website if website.startswith("http") else (
-        "https://" + website.lstrip("/")
+    website_normalised = url if url.startswith("http") else (
+        "https://" + url.lstrip("/")
     )
 
-    if pitch_payload is None:
-        # Interactive-only path; non-interactive mode errored out above.
-        click.echo(
-            "  No --pitch-file given. Opening $EDITOR for 6-section pitch ..."
-        )
-        pitch_payload = wizard.edit_pitch_interactively()
-
-    # ── 1d. Upload + create AIFlow ──────────────────────────
+    # ── 1d. Upload + create NEW AIFlow ──────────────────────
     if dry_run:
         click.echo()
         click.echo(f"  [dry-run] would upload CSV: {local_csv.name}")
@@ -826,19 +1209,43 @@ def _run_create_wizard(
                 code="AIFLOW_CREATE_NO_ID",
                 details=create,
             )
-        click.echo(f"  flowId  : {flow_id}")
+        click.echo(f"  flowId  : {flow_id}  (new)")
 
-    # ── 1e. Save pitch ──────────────────────────────────────
-    save_pitch_body = {
-        **pitch_payload,
-        "workflowId": flow_id,
-        "url": website_normalised,
-        "language": language,
-        "useConfigLanguage": (language == "auto"),
-    }
+    # ── 1e. LLM-generate pitch via test/connection ──────────
+    test_conn_lang = language if language != "auto" else "en-us"
     if dry_run:
-        click.echo("  [dry-run] would POST /api/v1/ai/workflow/save/pitch "
-                   "(6 sections validated)")
+        click.echo(
+            "  [dry-run] would POST /api/v1/ai/workflow/test/connection "
+            f"(url={website_normalised}, language={test_conn_lang})"
+        )
+        pitch_data = {}
+    else:
+        click.echo("  Generating pitch via test/connection ...")
+        test_resp = _safe_call(
+            lambda: client.test_website_connection(
+                website_normalised, test_conn_lang
+            ),
+            code="PITCH_GENERATION_FAILED",
+        )
+        pitch_data = (test_resp or {}).get("data") or {}
+        if not pitch_data.get("officialDescription"):
+            click.echo(
+                "  ! test/connection returned no officialDescription — the "
+                "pitch will be mostly empty. Check the URL.",
+                err=True,
+            )
+        else:
+            click.echo(
+                f"  Pitch generated "
+                f"(officialDescription: {pitch_data['officialDescription'][:60]}...)"
+            )
+
+    # ── 1f. Save pitch ──────────────────────────────────────
+    save_pitch_body = wizard.build_save_pitch_body(
+        flow_id, pitch_data, website_normalised, language,
+    )
+    if dry_run:
+        click.echo("  [dry-run] would POST /api/v1/ai/workflow/save/pitch")
     else:
         _safe_call(
             lambda: client.save_pitch(save_pitch_body),
@@ -846,60 +1253,89 @@ def _run_create_wizard(
         )
         click.echo("  Pitch saved.")
 
-    # ── 1f. Trigger default email-prompt generation ──────────────
-    # First call to /get/prompt on this flow has a side effect: the
-    # backend reads pitch + ICP + headers, generates default prompts for
-    # each step, and persists them to t_ai_workflow_prompt. Without this
-    # step, save/setting would launch a flow whose prompt table is empty
-    # — the schedule runner would have nothing to feed the LLM.
+    # ── 1g. Ensure step rows exist in t_ai_workflow_prompt ─────
+    # The backend's /get/prompt seeds default step rows on first call for
+    # some flow types but returns [] for others (e.g. ENROLL). The frontend
+    # handles this by defaulting to a 3-step pipeline in the UI; the CLI
+    # mirrors that by calling /save/prompt with 3 skeleton rows when the
+    # initial /get/prompt is empty. At least one step is required for the
+    # scheduler to have anything to send.
     if dry_run:
         click.echo(
             "  [dry-run] would POST /api/v1/ai/workflow/get/prompt "
-            "(triggers backend to auto-populate default email prompts)"
+            "(check for existing steps)"
         )
+        click.echo(
+            "  [dry-run] would seed 3 default step rows via /save/prompt "
+            "(1h / 3d / 7d delays) if /get/prompt returns empty"
+        )
+        prompt_steps = []
     else:
-        _safe_call(
+        prompt_resp = _safe_call(
             lambda: client.get_workflow_prompt(flow_id),
             code="WORKFLOW_PROMPT_INIT_FAILED",
         )
-        click.echo("  Default email prompts persisted.")
+        prompt_steps = wizard.extract_prompt_steps(prompt_resp)
+        if not prompt_steps:
+            click.echo(
+                "  /get/prompt returned no steps — seeding 3 default rows "
+                "(1h / 3d / 7d) so the flow has a pipeline to launch against."
+            )
+            prompt_steps = _safe_call(
+                lambda: wizard.seed_default_steps(client, flow_id),
+                code="WORKFLOW_PROMPT_SEED_FAILED",
+            )
+        click.echo(
+            f"  Steps in t_ai_workflow_prompt: {len(prompt_steps)}"
+        )
 
-    # ── 2. AIFlow — default email-sequence template (read-only) ────
+    # ── 2. Prompts — optional LLM regenerate, then save/prompt ──
     click.echo()
-    click.secho(f"{header}Step 2 / 3 - AIFlow", fg="cyan", bold=True)
-    click.echo(f"  Emails per contact: {email_rounds}")
+    click.secho(f"{header}Step 2 / 3 - Prompts", fg="cyan", bold=True)
+    if regenerate_emails:
+        if dry_run:
+            click.echo(
+                "  [dry-run] would iterate /get/email/prompt per step "
+                "(SSE-parsed into emailContent prompt template)"
+            )
+        else:
+            click.echo(
+                f"  Regenerating email prompt templates for "
+                f"{len(prompt_steps)} step(s) via /get/email/prompt (LLM) ..."
+            )
+            prompt_steps = wizard.regenerate_step_content(
+                client, flow_id, prompt_steps,
+            )
+    else:
+        click.echo(
+            "  --regenerate-emails not set; step rows have empty content. "
+            "Re-run with --regenerate-emails to populate emailContent prompt "
+            "templates before launch."
+        )
+
+    incomplete = wizard.count_incomplete_prompts(prompt_steps)
     click.echo(
-        "  (Default email sequence template shown as preview; not "
-        "editable in V1.)"
+        f"  Step completeness  : "
+        f"{len(prompt_steps) - incomplete}/{len(prompt_steps)} ready"
     )
-    template = _safe_call(
-        lambda: client.get_time_template(),
-        code="TIME_TEMPLATE_FAILED",
-    )
-    tpl_summary = (template or {}).get("data")
-    if tpl_summary is not None:
-        click.echo(f"  Template: {_short_repr(tpl_summary)}")
+
+    if not dry_run and prompt_steps:
+        save_prompt_body = _safe_call(
+            lambda: wizard.build_save_prompt_body(flow_id, prompt_steps),
+            code="PROMPT_BODY_BUILD_FAILED",
+        )
+        _safe_call(
+            lambda: client.save_prompt(flow_id, save_prompt_body["prompts"]),
+            code="PROMPT_SAVE_FAILED",
+        )
+        click.echo("  Prompts persisted via /save/prompt.")
+    elif dry_run:
+        click.echo("  [dry-run] would POST /api/v1/ai/workflow/save/prompt")
 
     # ── 3. Settings ─────────────────────────────────────────
     click.echo()
     click.secho(f"{header}Step 3 / 3 - Settings", fg="cyan", bold=True)
     click.echo("  Automated Approval : " + ("ON" if auto_approve else "OFF"))
-    click.echo(
-        "  Schedule           : Mon-Fri 10:00-17:00 UTC-5 (fixed in V1)"
-    )
-
-    # Load current email config so we can preserve timeTemplateConfig /
-    # emailTrack / timeTemplateId and only edit mailbox list + autoApprove.
-    # Dry-run skips this (no flowId yet) and saves with empty props.
-    if dry_run:
-        props = {}
-    else:
-        email_cfg = _safe_call(
-            lambda: client.get_email_config({"workflowId": flow_id}),
-            code="EMAIL_CONFIG_LOAD_FAILED",
-        )
-        cfg_data = (email_cfg or {}).get("data") or {}
-        props = cfg_data.get("properties") or {}
 
     # Pick mailboxes — read-only probe works in both modes.
     mailboxes_resp = _safe_call(
@@ -947,26 +1383,29 @@ def _run_create_wizard(
             code="USAGE_NO_MAILBOX",
         )
 
-    new_props = dict(props)
-    new_props["sequenceMailboxList"] = sequence_list
-
-    # Decide whether to launch BEFORE writing, because launch vs draft
-    # uses two different backend endpoints that are NOT interchangeable:
-    #   save/email/config          — draft-only, flow stays DRAFT
-    #   save/setting (the real launch path used by the frontend's
-    #                "Launch AIFlow" button at settings.vue:358)
-    #                — persists settings AND transitions DRAFT -> ACTIVE
-    # Hitting save/email/config first then /sequence/status/.../ACTIVE
-    # returns 200 but data:false (state machine refuses the transition);
-    # save/setting is the only working launch path from DRAFT.
+    # ── Launch decision ─────────────────────────────────────
     if launch_now is None:
         if interactive:
             launch_now = click.confirm(
                 "Launch this AIFlow now? (No = save as draft)", default=True
             )
         else:
-            # Non-wizard default: save as draft unless --launch was explicit.
             launch_now = False
+
+    # Completeness gate — block launch when content missing unless user
+    # explicitly opted into --regenerate-emails or every step is already full.
+    if launch_now and not dry_run and incomplete > 0:
+        emit_error(
+            f"{incomplete} of {len(prompt_steps)} email step(s) have empty "
+            "content; launching would produce no sends. Re-run with "
+            "`--regenerate-emails --launch` to fill them in via LLM, or skip "
+            "--launch to save as DRAFT and edit in the web UI.",
+            code="AIFLOW_LAUNCH_PROMPTS_INCOMPLETE",
+            details={
+                "totalSteps": len(prompt_steps),
+                "incompleteSteps": incomplete,
+            },
+        )
 
     if launch_now and interactive and not yes and not dry_run:
         click.confirm("Proceed with launch?", abort=True, default=True)
@@ -974,63 +1413,79 @@ def _run_create_wizard(
     if launch_now and not dry_run:
         _check_token_balance(client, required=None, force=force)
 
-    # /save/setting requires a populated ``timeTemplateConfig`` or the
-    # backend replies ``400 Unknown error``. Fresh draft flows have
-    # ``timeTemplateConfig: null``, so on the launch branch we fetch
-    # the account's template library and embed one + its id. Draft
-    # saves (/save/email/config) don't have this constraint.
+    launch_result = None
+    setting_resp = {}
+    time_template = None
+    meeting_router_id = None
+
     if launch_now and not dry_run:
-        template = wizard.pick_default_time_template(client)
-        if template is None:
+        # 3a. /get/setting — pull defaults (agentPromptList, emailTrack, ...)
+        setting_resp = _safe_call(
+            lambda: client.get_setting(flow_id),
+            code="AIFLOW_GET_SETTING_FAILED",
+        )
+        setting_resp = (setting_resp or {}).get("data") or setting_resp or {}
+
+        # 3b. /time/template/list — required for timeTemplateConfig
+        time_template = wizard.pick_default_time_template(client)
+        if time_template is None:
             emit_error(
                 "No time-template available on the account — cannot populate "
-                "timeTemplateConfig for launch. Create one in the web UI first, "
-                "or launch with --no-launch and configure settings there.",
+                "timeTemplateConfig for launch. Create one in the web UI first.",
                 code="AIFLOW_LAUNCH_NO_TIME_TEMPLATE",
             )
-        new_props["timeTemplateConfig"] = wizard.build_time_template_config(template)
-        new_props["timeTemplateId"] = template.get("id")
         click.echo(
-            f"  Time template      : {template.get('name', '')[:60]}"
-            f" (id={template.get('id')})"
+            f"  Time template      : {time_template.get('name', '')[:60]}"
+            f" (id={time_template.get('id')})"
         )
 
-    save_body = {
-        "workflowId": flow_id,
-        "properties": new_props,
-        "autoApprove": bool(auto_approve),
-    }
+        # 3c. /meeting/personal/list — first id for Book Meeting
+        if setting_resp.get("isShowAiReply"):
+            meetings_resp = _safe_call(
+                lambda: client.list_personal_meetings(),
+                code="MEETING_LIST_FAILED",
+            )
+            meeting_router_id = wizard.pick_first_meeting_router_id(meetings_resp)
+            if meeting_router_id is None:
+                click.echo(
+                    "  Warning: no personal meeting router — agentPromptList "
+                    "Book Meeting entry will have an empty meetingRouteId.",
+                    err=True,
+                )
 
-    launch_result = None
-    if dry_run:
-        if launch_now:
+    # ── Assemble + send save/setting ────────────────────────
+    if launch_now:
+        save_body = wizard.build_save_setting_body(
+            flow_id,
+            time_template or {},
+            sequence_list,
+            setting_resp,
+            auto_approve,
+            enable_agent_reply=enable_agent_reply,
+            agent_strategy=agent_strategy,
+            meeting_router_id=meeting_router_id,
+        )
+        if dry_run:
             click.echo(
                 "  [dry-run] would POST /api/v1/ai/workflow/save/setting "
                 "(launch: persists settings AND transitions DRAFT -> ACTIVE)"
             )
         else:
-            click.echo(
-                "  [dry-run] would POST /api/v1/ai/workflow/agent/save/email/config "
-                "(draft: persists settings, flow stays DRAFT)"
+            launch_result = _safe_call(
+                lambda: client.save_setting(save_body),
+                code="AIFLOW_LAUNCH_FAILED",
             )
-    elif launch_now:
-        launch_result = _safe_call(
-            lambda: client.save_setting(save_body),
-            code="AIFLOW_LAUNCH_FAILED",
-        )
-        click.echo("  Settings saved + flow launched.")
+            click.echo("  Settings saved + flow launched.")
     else:
-        _safe_call(
-            lambda: client.save_email_config(save_body),
-            code="EMAIL_CONFIG_SAVE_FAILED",
+        click.echo(
+            "  Flow left as DRAFT (no save/setting call). Re-run with "
+            "--launch + --regenerate-emails to launch the next time."
         )
-        click.echo("  Settings saved (flow remains DRAFT).")
 
     # ── Summary ─────────────────────────────────────────────
     click.echo()
     click.secho(f"{header}Summary", fg="cyan", bold=True)
 
-    # Token balance probe (read-only, useful in dry-run too).
     balance = None
     try:
         balance = client.get_token_balance()
@@ -1042,13 +1497,16 @@ def _run_create_wizard(
         "flowId": flow_id,
         "contacts": total,
         "uniqueEmails": unique_emails,
-        "website": website_normalised,
+        "url": website_normalised,
         "language": language,
         "countryColumn": country_col,
-        "emailRounds": email_rounds,
+        "stepsTotal": len(prompt_steps),
+        "stepsIncomplete": incomplete,
+        "regenerateEmails": regenerate_emails,
         "mailboxesSelected": len(sequence_list),
         "autoApprove": bool(auto_approve),
         "launched": bool(launch_now) and not dry_run,
+        "meetingRouterId": meeting_router_id,
     }
     if balance is not None:
         summary["tokenRemaining"] = balance["tokenRemaining"]
@@ -1068,19 +1526,10 @@ def _run_create_wizard(
         if launch_result is not None:
             emit(launch_result)
     else:
-        click.echo("Saved as draft. Launch later with:")
         click.echo(
-            f"  flashclaw-cli-plugin-flashrev-aiflow aiflow start {flow_id}"
+            f"Saved as DRAFT (flowId={flow_id}). Re-run with "
+            "--regenerate-emails --launch to activate."
         )
-
-
-def _short_repr(obj) -> str:
-    """Compact one-line repr for wizard-time summaries (avoid huge JSON blobs)."""
-    try:
-        s = json.dumps(obj, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        s = str(obj)
-    return s if len(s) <= 240 else s[:237] + "..."
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1117,16 +1566,33 @@ def mailboxes_list(status, warmup):
 
 
 @mailboxes.command("bind-list")
-def mailboxes_bind_list():
-    """Show mailboxes currently bound to the AIFlow account.
+@click.argument("flow_id")
+def mailboxes_bind_list(flow_id):
+    """Show the mailbox pool bound to an AIFlow.
 
-    Calls: GET /api/v1/ai/workflow/agent/get/bind/email
+    Calls: GET /api/v1/ai/workflow/get/bind/email/{flowId}
     """
     _require_api_key()
     client = _build_client()
     result = _safe_call(
-        lambda: client.get_bind_email(),
+        lambda: client.get_bind_email(flow_id),
         code="MAILBOXES_BIND_LIST_FAILED",
+    )
+    emit(result)
+
+
+@mailboxes.command("unbind-list")
+@click.argument("flow_id")
+def mailboxes_unbind_list(flow_id):
+    """Show the mailboxes an AIFlow is actively using (currently-active set).
+
+    Calls: GET /api/v1/ai/workflow/get/unbind/email/{flowId}
+    """
+    _require_api_key()
+    client = _build_client()
+    result = _safe_call(
+        lambda: client.get_unbind_email(flow_id),
+        code="MAILBOXES_UNBIND_LIST_FAILED",
     )
     emit(result)
 
@@ -1135,13 +1601,46 @@ def mailboxes_bind_list():
 def mailboxes_has_active():
     """Check whether the current account has any active mailbox.
 
-    Calls: GET /api/v1/ai/workflow/agent/has/active/email
+    Calls: GET /api/v1/ai/workflow/has/active/email
     """
     _require_api_key()
     client = _build_client()
     result = _safe_call(
         lambda: client.has_active_email(),
         code="MAILBOXES_HAS_ACTIVE_FAILED",
+    )
+    emit(result)
+
+
+# ═══════════════════════════════════════════════════════════
+# meetings — meeting-svc personal routers
+# ═══════════════════════════════════════════════════════════
+
+@cli.group()
+def meetings():
+    """Meeting routers (meeting-svc) — personal meeting listing.
+
+    The wizard's launch branch picks ``meetings[0].id`` as the
+    ``meetingRouteId`` for the Book Meeting agent-reply strategy;
+    this group lets you inspect that list directly.
+    """
+
+
+@meetings.command("list")
+@click.option("--name", "meet_name", default="",
+              help="Filter by meeting name (LIKE match, case-sensitive).")
+@click.option("--type", "meet_type", default="",
+              help="Filter by meetingEventType (exact match).")
+def meetings_list(meet_name, meet_type):
+    """List personal meeting routers.
+
+    Calls: POST /meeting/api/v1/meeting/personal/list
+    """
+    _require_api_key()
+    client = _build_client()
+    result = _safe_call(
+        lambda: client.list_personal_meetings(meet_name, meet_type),
+        code="MEETINGS_LIST_FAILED",
     )
     emit(result)
 
