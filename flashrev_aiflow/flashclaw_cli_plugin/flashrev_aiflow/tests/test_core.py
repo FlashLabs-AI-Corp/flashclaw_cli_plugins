@@ -1383,5 +1383,48 @@ class TestAiflowEditCommands(unittest.TestCase):
         self.assertEqual(save_body["agentStrategy"], "Book Meeting")
 
 
+class TestWelcomeBanner(unittest.TestCase):
+    """First-run onboarding banner on bare CLI invocation."""
+
+    def setUp(self):
+        from click.testing import CliRunner
+        from flashclaw_cli_plugin.flashrev_aiflow import flashrev_aiflow_cli
+
+        self.runner = CliRunner()
+        self.cli = flashrev_aiflow_cli.cli
+        self.key_patch_path = (
+            "flashclaw_cli_plugin.flashrev_aiflow."
+            "flashrev_aiflow_cli.get_api_key"
+        )
+
+    def test_banner_shown_when_no_api_key(self):
+        with patch(self.key_patch_path, return_value=None):
+            result = self.runner.invoke(self.cli, [], catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0)
+        # Success signal + exact privateApps URL + login command snippet.
+        self.assertIn(
+            "flashclaw-cli-plugin-flashrev-aiflow installed successfully.",
+            result.output,
+        )
+        self.assertIn(
+            "https://info.flashlabs.ai/settings/privateApps", result.output,
+        )
+        self.assertIn("auth login --token sk_xxx", result.output)
+        # Help text still follows (banner does not suppress --help).
+        self.assertIn("Usage:", result.output)
+
+    def test_banner_suppressed_when_key_configured(self):
+        with patch(self.key_patch_path, return_value="sk_fake_already_bound"):
+            result = self.runner.invoke(self.cli, [], catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0)
+        # No onboarding banner for returning users.
+        self.assertNotIn("installed successfully", result.output)
+        self.assertNotIn(
+            "https://info.flashlabs.ai/settings/privateApps", result.output,
+        )
+        # Normal --help is still emitted.
+        self.assertIn("Usage:", result.output)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -129,7 +129,43 @@ def cli(ctx, json_mode):
     set_json_mode(json_mode)
     ctx.ensure_object(dict)
     if ctx.invoked_subcommand is None:
+        _print_welcome_banner_if_unconfigured()
         click.echo(ctx.get_help())
+
+
+def _print_welcome_banner_if_unconfigured():
+    """First-run onboarding.
+
+    When a user runs the bare ``flashclaw-cli-plugin-flashrev-aiflow``
+    command (no subcommand) right after `pipx install ...` and has not
+    yet bound an API key, print a concise "installed successfully —
+    here's how to set up" banner that points at
+    https://info.flashlabs.ai/settings/privateApps. Silenced as soon as
+    a key is present so returning users only see the normal --help.
+    """
+    if get_api_key():
+        return
+    click.echo()
+    click.secho(
+        "flashclaw-cli-plugin-flashrev-aiflow installed successfully.",
+        fg="green", bold=True,
+    )
+    click.echo()
+    click.echo("Get started (3 steps):")
+    click.echo(
+        "  1. Open https://info.flashlabs.ai/settings/privateApps and "
+        "create / copy an API key (starts with 'sk_')."
+    )
+    click.echo("  2. Bind it locally:")
+    click.echo(
+        "       flashclaw-cli-plugin-flashrev-aiflow auth login "
+        "--token sk_xxx"
+    )
+    click.echo("  3. Verify:")
+    click.echo("       flashclaw-cli-plugin-flashrev-aiflow auth whoami")
+    click.echo()
+    click.echo("Full command list below:")
+    click.echo()
 
 
 # ═══════════════════════════════════════════════════════════

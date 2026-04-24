@@ -73,7 +73,14 @@ operators iterate on a flow without recreating it from scratch.
 - `FLASHREV_AIFLOW_MEETING_PREFIX` env override.
 - `auth status` JSON payload now includes `meeting_prefix`.
 
-### Added — prompt copy
+### Added — onboarding + prompt copy
+- First-run welcome banner. Running the bare
+  `flashclaw-cli-plugin-flashrev-aiflow` command (no subcommand) after
+  `pipx install` prints a green "installed successfully" message plus a
+  3-step onboarding checklist that points at
+  https://info.flashlabs.ai/settings/privateApps for API key creation,
+  shows the exact `auth login` command, and ends with `auth whoami` as
+  a verification step. Banner auto-suppresses once a key is bound.
 - Missing API key prompt now points to
   https://info.flashlabs.ai/settings/privateApps for key creation.
 - Insufficient / exhausted token balance prompts point to
@@ -134,14 +141,15 @@ operators iterate on a flow without recreating it from scratch.
   retry 3 times with 2s backoff before giving up on a step.
 
 ### Tests
-- 77 passing (was 41). New coverage: V2 endpoints (`test_connection`
+- 79 passing (was 41). New coverage: V2 endpoints (`test_connection`
   with language, `save_pitch` path fix, `get_email_prompt` body shape,
   `get_setting` / `draft` / `list_personal_meetings` paths, meeting
   prefix routing), `_parse_sse_content` + `seed_default_steps` +
   `patch_meeting_route_id` + `pick_first_meeting_router_id`,
   `build_save_setting_body` (DRAFT / flag overrides / agent block
   visibility), all four edit commands (pitch-update / prompt-show /
-  prompt-update / settings-update), launch-completeness gate.
+  prompt-update / settings-update), launch-completeness gate, and the
+  first-run welcome banner (shown-when-unconfigured + suppressed-when-bound).
 
 ### Docs
 - `README.md` rewritten: V2 pipeline table, `--no-wizard` required-field
