@@ -312,6 +312,70 @@ class FlashrevAiflowClient:
             )
         )
 
+    def get_workflow_prompt(self, workflow_id) -> dict:
+        """POST /api/v1/ai/workflow/get/prompt (SSE-style streaming response).
+
+        The first call on a newly-created flow has an important
+        **side effect**: the backend reads the flow's ICP targeting +
+        pitch + header variables and auto-generates default email
+        prompts (``emailSubject`` / ``emailContent`` LLM prompts +
+        sample ``subject`` / ``content``) for each step, then persists
+        them to ``t_ai_workflow_prompt``. Subsequent calls just return
+        the stored rows.
+
+        The CLI invokes this in the create pipeline purely for the
+        side effect: without it, ``save/setting`` launches a flow whose
+        ``t_ai_workflow_prompt`` is empty, and the schedule runner may
+        find no prompts to feed the LLM when the send window opens.
+
+        The response body is a JSON array of step dicts; requests.post
+        still returns once the server has written the full body, so
+        ``resp.json()`` works (with ``_handle``'s ``{"raw": text}``
+        fallback for any odd content type).
+        """
+        return self._handle(
+            requests.post(
+                self._url_discover("/api/v1/ai/workflow/get/prompt"),
+                json={"workflowId": workflow_id},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        )
+
+    def save_workflow_prompt(self, payload: dict) -> dict:
+        """POST /api/v1/ai/workflow/save/prompt — persist edited step prompts.
+
+        Body shape (from search-website/src/views/ai-sdr/workflow.vue:462):
+            {
+              workflowId: Long,
+              prompts: [
+                {
+                  id?, workflowStepId?,              # for edits; omit on new
+                  step: Integer,                     # 1..20
+                  stepType: "Email",
+                  delayMinutes: Integer,             # 0 / 1440=1d / 10080=1w
+                  emailSubject: String,              # LLM prompt, {{var}} ok
+                  emailContent: String,              # LLM prompt, {{var}} ok
+                  subject?: String,                  # generated sample (opt)
+                  content?: String,                  # generated sample (opt)
+                }, ...
+              ]
+            }
+
+        Not currently invoked by any CLI command — included for the future
+        ``aiflow workflow save`` command. For the default-prompts case
+        (create + launch), :meth:`get_workflow_prompt` is enough since
+        the backend auto-generates + persists defaults on first call.
+        """
+        return self._handle(
+            requests.post(
+                self._url_discover("/api/v1/ai/workflow/save/prompt"),
+                json=payload,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        )
+
     def test_website_connection(self, url: str) -> dict:
         """POST /api/v1/ai/workflow/agent/test/connection (timeout 20s)."""
         return self._handle(

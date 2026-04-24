@@ -846,6 +846,24 @@ def _run_create_wizard(
         )
         click.echo("  Pitch saved.")
 
+    # ── 1f. Trigger default email-prompt generation ──────────────
+    # First call to /get/prompt on this flow has a side effect: the
+    # backend reads pitch + ICP + headers, generates default prompts for
+    # each step, and persists them to t_ai_workflow_prompt. Without this
+    # step, save/setting would launch a flow whose prompt table is empty
+    # — the schedule runner would have nothing to feed the LLM.
+    if dry_run:
+        click.echo(
+            "  [dry-run] would POST /api/v1/ai/workflow/get/prompt "
+            "(triggers backend to auto-populate default email prompts)"
+        )
+    else:
+        _safe_call(
+            lambda: client.get_workflow_prompt(flow_id),
+            code="WORKFLOW_PROMPT_INIT_FAILED",
+        )
+        click.echo("  Default email prompts persisted.")
+
     # ── 2. AIFlow — default email-sequence template (read-only) ────
     click.echo()
     click.secho(f"{header}Step 2 / 3 - AIFlow", fg="cyan", bold=True)
