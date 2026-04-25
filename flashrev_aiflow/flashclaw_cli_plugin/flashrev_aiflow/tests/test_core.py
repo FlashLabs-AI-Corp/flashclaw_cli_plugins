@@ -193,12 +193,16 @@ class TestClientEndpoints(unittest.TestCase):
         self.assertNotIn("/flashrev/mailsvc", called_url)
 
     @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
-    def test_test_website_connection_uses_20s_timeout(self, mock_post):
+    def test_test_website_connection_uses_shared_timeout(self, mock_post):
         mock_post.return_value = self._mock_response({"code": 200})
 
         self.client.test_website_connection("https://acme.com")
 
-        self.assertEqual(mock_post.call_args[1]["timeout"], 20)
+        # Now uses the shared self.timeout (default 300s) so cold-cache
+        # site fetches don't hit a hard 20s cap. Must be >= 180s to
+        # satisfy the 3-minute floor.
+        self.assertEqual(mock_post.call_args[1]["timeout"], self.client.timeout)
+        self.assertGreaterEqual(self.client.timeout, 180)
         self.assertEqual(
             mock_post.call_args[1]["json"],
             {"url": "https://acme.com", "language": "en-us"},
@@ -588,7 +592,7 @@ class TestV2ClientEndpoints(unittest.TestCase):
         self.client.test_website_connection("https://baidu.com", "en-us")
         body = mock_post.call_args[1]["json"]
         self.assertEqual(body, {"url": "https://baidu.com", "language": "en-us"})
-        self.assertEqual(mock_post.call_args[1]["timeout"], 20)
+        self.assertEqual(mock_post.call_args[1]["timeout"], self.client.timeout)
 
     @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
     def test_save_pitch_path_no_agent_segment(self, mock_post):
@@ -1100,6 +1104,62 @@ class TestCreateNoWizardV2(unittest.TestCase):
         self.client_stub.save_setting.assert_not_called()
         # Gate message should mention prompt-update as the recovery path.
         self.assertIn("prompt-update", result.output)
+
+    def test_default_create_triggers_save_setting(self):
+        """Without an explicit --launch / --no-launch flag, --no-wizard
+        mode must default to launching the flow (i.e. firing save/setting)
+        — otherwise the flow has no sequence bound and the scheduler can't
+        send anything. Mirror the frontend's "Launch AIFlow" button being
+        the natural endpoint of the create wizard."""
+        # Wire just enough stubs for the launch branch to complete.
+        self.client_stub.upload_contacts_csv.return_value = {
+            "code": 200, "data": {"listId": 1, "listName": "c.csv"},
+        }
+        self.client_stub.create_aiflow_from_list.return_value = {
+            "code": 200, "data": {"id": 999},
+        }
+        self.client_stub.test_website_connection.return_value = {
+            "code": 200, "data": {"officialDescription": "d"},
+        }
+        self.client_stub.save_pitch.return_value = {"code": 200}
+        # Empty initial /get/prompt then 3 seeded rows on re-query (post seed).
+        self.client_stub.get_workflow_prompt.side_effect = [
+            [],
+            [
+                {"id": 10, "workflowStepId": 10, "step": 1,
+                 "delayMinutes": 60, "emailContent": "filled"},
+                {"id": 11, "workflowStepId": 11, "step": 2,
+                 "delayMinutes": 4320, "emailContent": "filled"},
+                {"id": 12, "workflowStepId": 12, "step": 3,
+                 "delayMinutes": 10080, "emailContent": "filled"},
+            ],
+        ]
+        self.client_stub.save_prompt.return_value = {"code": 200, "data": True}
+        self.client_stub.get_setting.return_value = {
+            "isShowAiReply": False, "autoApprove": False,
+            "agentPromptList": [],
+        }
+        self.client_stub.list_time_templates.return_value = {
+            "code": 200, "data": [{"id": 1, "name": "tpl",
+                                   "properties": {}, "timeBlocks": []}],
+        }
+        self.client_stub.list_personal_meetings.return_value = {
+            "code": 200, "data": [],
+        }
+        self.client_stub.save_setting.return_value = {"code": 200, "data": True}
+
+        result = self._invoke(
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "en-us",
+            # NO --launch / --no-launch flag — relies on default-on
+            "--no-regenerate-emails",  # short-circuit LLM, content already "filled"
+            "-y",
+        )
+        # save_setting MUST have been called — that's the whole point.
+        self.assertTrue(
+            self.client_stub.save_setting.called,
+            msg=f"save/setting was NOT called — flow stayed DRAFT.\n{result.output}",
+        )
 
     def test_default_create_triggers_regenerate_emails(self):
         """The default --regenerate-emails=True path must hit

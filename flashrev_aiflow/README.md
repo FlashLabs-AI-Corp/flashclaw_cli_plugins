@@ -223,7 +223,7 @@ flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard \
 | `--country-column` | Required when `--language=auto`; pass `none` to skip |
 | `--mailboxes` | Optional (default `all-active`) |
 | `--regenerate-emails` / `--no-regenerate-emails` | Optional (default: ON — LLM-fills every step's emailContent) |
-| `--launch` / `--no-launch` | Optional (default: save as DRAFT in `--no-wizard`) |
+| `--launch` / `--no-launch` | Optional (default: ON — fires `/save/setting`, transitions DRAFT → ACTIVE, binds sequence + mailbox + time template). Pass `--no-launch` only when you intend to populate prompts later via `aiflow prompt-update`. |
 
 **Launch-time completeness gate**
 

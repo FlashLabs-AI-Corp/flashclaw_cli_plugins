@@ -1004,10 +1004,16 @@ def aiflow_settings_update(
               help="Override agentStrategy in the /save/setting body. "
                    "Default: inherit whatever /get/setting returned.")
 @click.option("--launch/--no-launch", "launch_now", default=None,
-              help="Launch the AIFlow after save. In --no-wizard mode, "
-                   "defaults to --no-launch (save as draft) unless --launch "
-                   "is passed. Launch is blocked when any step's emailContent "
-                   "is empty (see --regenerate-emails, default on).")
+              help="Launch the AIFlow after save. Default ON in both "
+                   "interactive (prompted, defaults to yes) and --no-wizard "
+                   "modes — without launch, the flow stays DRAFT with no "
+                   "sequence bound on the engage service, no mailbox bound, "
+                   "no time template, and the scheduler has nothing to "
+                   "execute against. Pass --no-launch explicitly for a "
+                   "DRAFT-only run (e.g. you plan to populate prompts later "
+                   "via `aiflow prompt-update` before launching). Launch is "
+                   "blocked when any step's emailContent is empty (see "
+                   "--regenerate-emails, default on).")
 @click.option("-y", "--yes", is_flag=True,
               help="Skip the final confirmation prompt.")
 @click.option("--force", is_flag=True,
@@ -1432,13 +1438,20 @@ def _run_create_wizard(
         )
 
     # ── Launch decision ─────────────────────────────────────
+    # Frontend's "Launch AIFlow" button is the natural endpoint of the
+    # create wizard — without it the flow has no sequence bound on the
+    # engage side, no mailbox bound, no time template, and the email
+    # scheduler has nothing to execute against. So default to launching
+    # in BOTH modes: interactive prompts (with default=True) and
+    # --no-wizard auto-launch. Users who genuinely want a DRAFT-only
+    # flow pass --no-launch explicitly.
     if launch_now is None:
         if interactive:
             launch_now = click.confirm(
                 "Launch this AIFlow now? (No = save as draft)", default=True
             )
         else:
-            launch_now = False
+            launch_now = True
 
     # Completeness gate — block launch when any step's emailContent is still
     # empty. With --regenerate-emails on by default, this normally only fires
