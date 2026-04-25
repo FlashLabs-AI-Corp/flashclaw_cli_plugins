@@ -11,7 +11,7 @@ _(nothing yet)_
 
 ---
 
-## 0.2.0 — 2026-04-24
+## 0.3.0 — 2026-04-24
 
 Major rewrite to match the real `search-website` frontend flow: pitch
 content is now LLM-generated from a URL, email prompt templates are
