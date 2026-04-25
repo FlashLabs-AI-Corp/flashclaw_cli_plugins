@@ -354,14 +354,19 @@ class FlashrevAiflowClient:
         service. Has NO side effects (no DB writes); the response is the
         direct input for :meth:`save_pitch` once a ``workflowId`` exists.
 
-        20s timeout because the upstream LLM call can be slow.
+        Uses the shared ``self.timeout`` (default 300s, override via
+        ``FLASHREV_AIFLOW_TIMEOUT``). The upstream has to fetch the target
+        site (cold-cache fetches like tongchengir.com / ctrip.com routinely
+        take 20-30s) and then run an LLM pass on top — the previous 20s
+        cap was hit by any first-time URL even when the gateway / dubbo
+        path itself was healthy.
         """
         return self._handle(
             requests.post(
                 self._url_discover("/api/v1/ai/workflow/test/connection"),
                 json={"url": url, "language": language},
                 headers=self._headers(),
-                timeout=20,
+                timeout=self.timeout,
             )
         )
 

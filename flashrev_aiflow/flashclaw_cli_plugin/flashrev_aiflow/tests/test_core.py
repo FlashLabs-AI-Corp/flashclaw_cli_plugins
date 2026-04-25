@@ -193,12 +193,16 @@ class TestClientEndpoints(unittest.TestCase):
         self.assertNotIn("/flashrev/mailsvc", called_url)
 
     @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
-    def test_test_website_connection_uses_20s_timeout(self, mock_post):
+    def test_test_website_connection_uses_shared_timeout(self, mock_post):
         mock_post.return_value = self._mock_response({"code": 200})
 
         self.client.test_website_connection("https://acme.com")
 
-        self.assertEqual(mock_post.call_args[1]["timeout"], 20)
+        # Now uses the shared self.timeout (default 300s) so cold-cache
+        # site fetches don't hit a hard 20s cap. Must be >= 180s to
+        # satisfy the 3-minute floor.
+        self.assertEqual(mock_post.call_args[1]["timeout"], self.client.timeout)
+        self.assertGreaterEqual(self.client.timeout, 180)
         self.assertEqual(
             mock_post.call_args[1]["json"],
             {"url": "https://acme.com", "language": "en-us"},
@@ -588,7 +592,7 @@ class TestV2ClientEndpoints(unittest.TestCase):
         self.client.test_website_connection("https://baidu.com", "en-us")
         body = mock_post.call_args[1]["json"]
         self.assertEqual(body, {"url": "https://baidu.com", "language": "en-us"})
-        self.assertEqual(mock_post.call_args[1]["timeout"], 20)
+        self.assertEqual(mock_post.call_args[1]["timeout"], self.client.timeout)
 
     @patch("flashclaw_cli_plugin.flashrev_aiflow.core.client.requests.post")
     def test_save_pitch_path_no_agent_segment(self, mock_post):

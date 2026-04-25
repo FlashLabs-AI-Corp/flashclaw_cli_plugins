@@ -11,6 +11,30 @@ _(nothing yet)_
 
 ---
 
+## 0.3.2 — 2026-04-25
+
+### Fixed
+- `test_website_connection` (`POST /api/v1/ai/workflow/test/connection`)
+  no longer hard-codes a 20s read timeout. It now uses the shared
+  `self.timeout` (default 300s, configurable via the existing
+  `FLASHREV_AIFLOW_TIMEOUT` env var). The previous 20s cap was hit
+  whenever the upstream had to do a cold-cache fetch of the target site
+  (e.g. `tongchengir.com`, `ctrip.com` — both routinely take 20-30s
+  before the LLM pass even starts), causing `aiflow create` to abort
+  client-side after the workflow row was created but before pitch /
+  prompts / save-setting could run. Confirmed against the gateway in
+  test env: a `curl` to `/test/connection` for the same URL returns in
+  21s, well within the new 5min ceiling.
+
+### Tests
+- `test_test_website_connection_uses_20s_timeout` renamed to
+  `test_test_website_connection_uses_shared_timeout`. The assertion
+  now pins the timeout to `self.client.timeout` and adds a `>= 180`
+  floor so future regressions that drop the default below 3min are
+  caught (85 passing).
+
+---
+
 ## 0.3.1 — 2026-04-24
 
 ### Fixed
