@@ -1160,6 +1160,158 @@ class TestCreateNoWizardV2(unittest.TestCase):
             self.client_stub.save_setting.called,
             msg=f"save/setting was NOT called — flow stayed DRAFT.\n{result.output}",
         )
+        # Summary JSON must mark this run as a deliverable AIFlow.
+        # Downstream agents are told (via SKILL.md) to branch on
+        # creationComplete, so a regression here breaks contract.
+        self.assertIn('"creationComplete": true', result.output)
+        self.assertIn('"missing": []', result.output)
+        self.assertIn('"nextStep": null', result.output)
+
+    def test_no_launch_marks_creation_incomplete_with_next_step(self):
+        """The --no-launch escape hatch leaves the flow in a non-deliverable
+        state. The Summary JSON must reflect that with creationComplete=false
+        + a non-empty missing array + a nextStep recovery hint, so downstream
+        scripts and agents don't mistake the flowId for a working flow."""
+        self.client_stub.upload_contacts_csv.return_value = {
+            "code": 200, "data": {"listId": 1, "listName": "c.csv"},
+        }
+        self.client_stub.create_aiflow_from_list.return_value = {
+            "code": 200, "data": {"id": 999},
+        }
+        self.client_stub.test_website_connection.return_value = {
+            "code": 200, "data": {"officialDescription": "d"},
+        }
+        self.client_stub.save_pitch.return_value = {"code": 200}
+        self.client_stub.get_workflow_prompt.side_effect = [
+            [],
+            [
+                {"id": 10, "workflowStepId": 10, "step": 1,
+                 "delayMinutes": 60, "emailContent": "filled"},
+                {"id": 11, "workflowStepId": 11, "step": 2,
+                 "delayMinutes": 4320, "emailContent": "filled"},
+                {"id": 12, "workflowStepId": 12, "step": 3,
+                 "delayMinutes": 10080, "emailContent": "filled"},
+            ],
+        ]
+        self.client_stub.save_prompt.return_value = {"code": 200, "data": True}
+
+        result = self._invoke(
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "en-us",
+            "--no-regenerate-emails",
+            "--no-launch",
+            "-y",
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # save_setting must NOT have been called on this branch.
+        self.client_stub.save_setting.assert_not_called()
+        # Summary JSON: creation is NOT complete + caller is told what's
+        # missing + given a concrete recovery command.
+        self.assertIn('"creationComplete": false', result.output)
+        self.assertIn('"save/setting', result.output)
+        self.assertIn('aiflow settings-update', result.output)
+        # Yellow WARNING text in plain stdout (color codes stripped by
+        # CliRunner in some setups, so just check the keyword).
+        self.assertIn("WARNING", result.output)
+
+    def test_pipeline_failure_emits_aiflow_not_created_banner(self):
+        """Any failure mid-pipeline must surface as a prominent banner,
+        not just a one-line red error. Definition of done = M1 + M2 + M3
+        all complete; failure in any one leaves an orphan DRAFT and the
+        user must be told explicitly."""
+        # M1 succeeds: CSV uploads, flow row created.
+        self.client_stub.upload_contacts_csv.return_value = {
+            "code": 200, "data": {"listId": 42, "listName": "c.csv"},
+        }
+        self.client_stub.create_aiflow_from_list.return_value = {
+            "code": 200, "data": {"id": 9001},
+        }
+        # M2 aborts at /test/connection — simulates the cold-cache LLM
+        # outage that motivated the 0.3.2 timeout fix.
+        self.client_stub.test_website_connection.side_effect = Exception(
+            "Read timed out — upstream LLM unavailable"
+        )
+
+        result = self._invoke(
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "en-us",
+            "--no-regenerate-emails",
+            "-y",
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        # Banner content (stderr + stdout get merged in CliRunner output).
+        self.assertIn("AIFLOW NOT CREATED", result.output)
+        self.assertIn("M2", result.output)  # failed milestone
+        self.assertIn("9001", result.output)  # orphan flowId surfaced
+        self.assertIn("aiflow delete 9001", result.output)  # recovery hint
+        # M1 was completed before M2 aborted — banner must reflect that.
+        self.assertIn("[x] M1", result.output)
+        self.assertIn("[ ] M2", result.output)
+        self.assertIn("[ ] M3", result.output)
+        # JSON-mode addendum: structured failure block.
+        self.assertIn('"creationComplete": false', result.output)
+        self.assertIn('"failedMilestone": "M2-pitch-prompts"', result.output)
+        # save_setting must NOT have been called.
+        self.client_stub.save_setting.assert_not_called()
+
+    def test_pipeline_failure_at_m3_save_setting_emits_banner(self):
+        """When everything else succeeds but /save/setting itself fails,
+        the banner must still fire — flowId exists, prompts persisted,
+        but the AIFlow has no sequence binding so it's an orphan DRAFT."""
+        self.client_stub.upload_contacts_csv.return_value = {
+            "code": 200, "data": {"listId": 1, "listName": "c.csv"},
+        }
+        self.client_stub.create_aiflow_from_list.return_value = {
+            "code": 200, "data": {"id": 7777},
+        }
+        self.client_stub.test_website_connection.return_value = {
+            "code": 200, "data": {"officialDescription": "d"},
+        }
+        self.client_stub.save_pitch.return_value = {"code": 200}
+        self.client_stub.get_workflow_prompt.side_effect = [
+            [],
+            [
+                {"id": 10, "workflowStepId": 10, "step": 1,
+                 "delayMinutes": 60, "emailContent": "filled"},
+                {"id": 11, "workflowStepId": 11, "step": 2,
+                 "delayMinutes": 4320, "emailContent": "filled"},
+                {"id": 12, "workflowStepId": 12, "step": 3,
+                 "delayMinutes": 10080, "emailContent": "filled"},
+            ],
+        ]
+        self.client_stub.save_prompt.return_value = {"code": 200, "data": True}
+        self.client_stub.get_setting.return_value = {
+            "isShowAiReply": False, "autoApprove": False,
+            "agentPromptList": [],
+        }
+        self.client_stub.list_time_templates.return_value = {
+            "code": 200, "data": [{"id": 1, "name": "tpl",
+                                   "properties": {}, "timeBlocks": []}],
+        }
+        self.client_stub.list_personal_meetings.return_value = {
+            "code": 200, "data": [],
+        }
+        # M3's last call fails — pretend the engage service rejected
+        # the launch.
+        self.client_stub.save_setting.side_effect = Exception(
+            "engage-api 500 — sequence binding refused"
+        )
+
+        result = self._invoke(
+            "--no-wizard", "--csv", str(self.csv_path),
+            "--url", "acme.com", "--language", "en-us",
+            "--no-regenerate-emails",
+            "-y",
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("AIFLOW NOT CREATED", result.output)
+        self.assertIn("M3", result.output)
+        self.assertIn("7777", result.output)
+        # M1 + M2 ticked, M3 not.
+        self.assertIn("[x] M1", result.output)
+        self.assertIn("[x] M2", result.output)
+        self.assertIn("[ ] M3", result.output)
+        self.assertIn('"failedMilestone": "M3-settings"', result.output)
 
     def test_default_create_triggers_regenerate_emails(self):
         """The default --regenerate-emails=True path must hit

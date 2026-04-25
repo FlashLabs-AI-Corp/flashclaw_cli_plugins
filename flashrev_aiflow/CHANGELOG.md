@@ -11,6 +11,65 @@ _(nothing yet)_
 
 ---
 
+## 0.3.3 — 2026-04-25
+
+Definition-of-done is now enforced and surfaced. `aiflow create` is
+documented and instrumented as THREE required milestones: M1 — file
+upload + `create/list` (yields listId + flowId); M2 — pitch parsing
+(`test/connection` → `save/pitch`) + email prompt templates persisted
+(`get/email/prompt` → `save/prompt`); M3 — pick mailbox + time template
++ meetingRouteId + `POST /save/setting` (DRAFT → ACTIVE). Missing any
+milestone means the AIFlow is NOT successfully created.
+
+### Added
+- `_emit_creation_failure_banner` in the create wizard. On any pipeline
+  failure (network error, validation error, user abort) the CLI now
+  prints a prominent red `AIFLOW NOT CREATED` callout listing the
+  failed milestone, the M1/M2/M3 checklist with [x]/[ ] markers, the
+  partial state (listId / flowId), and concrete recovery commands
+  (`aiflow settings-update <id>` to resume, `aiflow delete <id>` to
+  discard the orphan DRAFT). Previously, mid-pipeline failures only
+  produced a single red `Error: ...` line, leaving users to figure out
+  whether a workflow row had been created and what state it was in.
+- `creationComplete`, `completedMilestones`, `missing`, and `nextStep`
+  fields in the `aiflow create` summary JSON. `creationComplete` is
+  the authoritative success signal (true only when M3-settings entered
+  `completedMilestones`); downstream agents and scripts should branch
+  on it rather than on `flowId` existence.
+- JSON-mode addendum: a structured `{creationComplete, failedMilestone,
+  completedMilestones, partialState, recovery}` block is emitted on
+  failure so agents can react without parsing the human banner.
+
+### Changed
+- `--no-launch` exit messaging promoted from a plain `Flow left as
+  DRAFT` line to a yellow `WARNING:` callout that explicitly states
+  the workflow has no sequenceId, no bound mailbox, no time template,
+  and the scheduler cannot send emails until settings-update fires.
+- `SKILL.md` `aiflow create` description rewritten around the
+  three-milestone definition of done. Agents are explicitly told to
+  read `creationComplete` + `completedMilestones`, not to assume
+  `flowId` alone means success.
+
+### Tests
+- Added `test_pipeline_failure_emits_aiflow_not_created_banner` —
+  M1 succeeds, M2 aborts at `test/connection`; asserts banner text,
+  the M1=[x] / M2=[ ] / M3=[ ] checklist, the orphan flowId surfaces
+  in the `aiflow delete` recovery hint, and `failedMilestone` JSON
+  field is correct.
+- Added `test_pipeline_failure_at_m3_save_setting_emits_banner` —
+  M1+M2 succeed, M3 fails at `save_setting`; asserts the banner
+  reflects the M3 failure even though everything upstream worked.
+- Extended `test_default_create_triggers_save_setting` to also assert
+  `creationComplete: true`, `missing: []`, `nextStep: null` on the
+  happy path.
+- Added `test_no_launch_marks_creation_incomplete_with_next_step` —
+  the deliberate `--no-launch` skip path must report
+  `creationComplete: false` + a non-empty `missing` array + a recovery
+  hint pointing at `aiflow settings-update`.
+- 88 passing (was 85).
+
+---
+
 ## 0.3.2 — 2026-04-25
 
 ### Fixed

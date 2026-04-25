@@ -37,8 +37,10 @@ from flashclaw_cli_plugin.flashrev_aiflow.core.session import (
 from flashclaw_cli_plugin.flashrev_aiflow.utils.output import (
     emit,
     emit_error,
+    is_json_mode,
     set_json_mode,
 )
+
 
 def _build_client() -> FlashrevAiflowClient:
     return FlashrevAiflowClient(base_url=get_base_url(), api_key=get_api_key())
@@ -66,6 +68,111 @@ def _safe_call(fn, *, code: str):
         return fn()
     except Exception as e:  # noqa: BLE001
         emit_error(str(e), code=code)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# AIFlow create — pipeline-level failure banner
+#
+# Definition of done for `aiflow create` is THREE required milestones:
+#   M1 — file upload + create/list  (listId + flowId)
+#   M2 — pitch + email prompt templates persisted
+#   M3 — mailbox + time template + meetingRouteId + /save/setting
+#         (DRAFT → ACTIVE)
+#
+# Missing any one means the AIFlow is NOT successfully created. The
+# wizard threads a `pipeline_state` dict through these milestones and
+# wraps the body in try/except SystemExit; any failure (network error,
+# validation error, user abort) hits this banner so the user sees an
+# unmistakable "AIFLOW NOT CREATED" callout, the milestone that aborted,
+# the partial state (so they can decide between retry / delete), and a
+# concrete recovery command.
+# ─────────────────────────────────────────────────────────────────────
+
+_MILESTONE_LABELS = {
+    "M1-contacts": "M1 — file upload + create/list (listId + flowId)",
+    "M2-pitch-prompts": "M2 — pitch + email prompt templates persisted",
+    "M3-settings": "M3 — mailbox + time template + meetingRouteId + /save/setting",
+}
+
+
+def _emit_creation_failure_banner(pipeline_state: dict, *, dry_run: bool = False):
+    """Promote any pipeline-level failure into a prominent banner.
+
+    Called from ``_run_create_wizard``'s SystemExit handler. ``_safe_call``
+    has already emitted its red ``Error: <message>`` line / structured
+    JSON; this function adds the milestone-level context on top so the
+    user can never confuse a partial pipeline run with a successful
+    create.
+    """
+    completed = pipeline_state.get("completedMilestones") or []
+    failed_milestone = pipeline_state.get("milestone") or "?"
+    list_id = pipeline_state.get("listId")
+    flow_id = pipeline_state.get("flowId")
+
+    bar = "=" * 64
+    click.echo(err=True)
+    click.secho(bar, fg="red", err=True)
+    click.secho(
+        "AIFLOW NOT CREATED — pipeline aborted before completion",
+        fg="red", bold=True, err=True,
+    )
+    click.secho(bar, fg="red", err=True)
+    click.secho(
+        f"  Failed at: {_MILESTONE_LABELS.get(failed_milestone, failed_milestone)}",
+        fg="red", err=True,
+    )
+    click.echo(
+        f"  Milestones completed: {completed if completed else '[]'}",
+        err=True,
+    )
+    click.echo("  Definition of done = ALL three required milestones:", err=True)
+    for key in ("M1-contacts", "M2-pitch-prompts", "M3-settings"):
+        mark = "[x]" if key in completed else "[ ]"
+        click.echo(f"    {mark} {_MILESTONE_LABELS[key]}", err=True)
+    click.echo("  Partial state:", err=True)
+    click.echo(f"    listId : {list_id if list_id else '(not yet)'}", err=True)
+    click.echo(f"    flowId : {flow_id if flow_id else '(not yet)'}", err=True)
+    if flow_id and not dry_run:
+        click.secho(
+            f"  This flow ({flow_id}) is an INCOMPLETE DRAFT — it will not "
+            "send any emails until creation is finished.",
+            fg="yellow", err=True,
+        )
+        click.echo("  Recovery options:", err=True)
+        click.echo(
+            f"    (a) resume:  aiflow settings-update {flow_id} "
+            "--enable-agent-reply",
+            err=True,
+        )
+        click.echo(f"    (b) discard: aiflow delete {flow_id}", err=True)
+    elif not dry_run:
+        click.echo(
+            "  No flow row was created — re-run `aiflow create` with the "
+            "same args after fixing the underlying issue.",
+            err=True,
+        )
+    click.secho(bar, fg="red", err=True)
+
+    # JSON-mode: emit a parallel structured failure block so agents can
+    # branch on creationComplete: false directly.
+    if is_json_mode():
+        emit({
+            "creationComplete": False,
+            "failedMilestone": failed_milestone,
+            "completedMilestones": completed,
+            "partialState": {
+                "listId": list_id,
+                "flowId": flow_id,
+            },
+            "recovery": (
+                [
+                    f"aiflow settings-update {flow_id} --enable-agent-reply",
+                    f"aiflow delete {flow_id}",
+                ]
+                if flow_id and not dry_run
+                else ["Re-run `aiflow create` after fixing the underlying issue"]
+            ),
+        })
 
 
 def _check_token_balance(client, required: int = None, force: bool = False):
@@ -1054,7 +1161,7 @@ def aiflow_create(
     """
     _require_api_key()
     client = _build_client()
-    _run_create_wizard(
+    _run_create_wizard_safe(
         client,
         csv_path=csv_path,
         sheet_url=sheet_url,
@@ -1074,9 +1181,47 @@ def aiflow_create(
     )
 
 
+def _run_create_wizard_safe(client, **kwargs):
+    """Outer guard around ``_run_create_wizard`` that surfaces ANY pipeline
+    failure as a prominent ``AIFLOW NOT CREATED`` banner.
+
+    Why: the create pipeline has THREE required milestones (file upload,
+    pitch+prompts, mailbox+timeTemplate+meetingRouter+save_setting). If
+    any one fails mid-flight, ``_safe_call`` calls ``emit_error`` which
+    calls ``sys.exit(1)`` (SystemExit). The user just sees a one-line
+    red ``Error: ...`` and may not realise the workflow row is now an
+    orphan DRAFT.
+
+    This wrapper threads a ``pipeline_state`` dict that the inner wizard
+    mutates as it crosses milestone boundaries, then on SystemExit prints
+    the milestone-aware banner and re-raises so the exit code is
+    preserved.
+    """
+    pipeline_state = {
+        # current milestone — updated at the start of each phase so a
+        # failure mid-phase points at the right one.
+        "milestone": "M1-contacts",
+        "listId": None,
+        "flowId": None,
+        # "M1-contacts", "M2-pitch-prompts", "M3-settings"
+        "completedMilestones": [],
+    }
+    dry_run = kwargs.get("dry_run", False)
+    try:
+        _run_create_wizard(client, pipeline_state=pipeline_state, **kwargs)
+    except SystemExit:
+        # M3-settings only enters completedMilestones when /save/setting
+        # actually returned. Anything short of that means the AIFlow is
+        # NOT successfully created — emit the banner.
+        if "M3-settings" not in pipeline_state["completedMilestones"]:
+            _emit_creation_failure_banner(pipeline_state, dry_run=dry_run)
+        raise
+
+
 def _run_create_wizard(
     client,
     *,
+    pipeline_state=None,
     csv_path=None,
     sheet_url=None,
     url=None,
@@ -1263,6 +1408,18 @@ def _run_create_wizard(
             )
         click.echo(f"  flowId  : {flow_id}  (new)")
 
+    # ── M1 (file upload + create/list) complete ─────────────
+    # Capture the partial state into pipeline_state so that any failure
+    # in M2 / M3 below still has the flowId / listId for the recovery
+    # banner. Dry-run sets these to the "<dry-run>" sentinel — the
+    # banner's recovery branch ignores those.
+    if pipeline_state is not None:
+        pipeline_state["listId"] = list_id
+        pipeline_state["flowId"] = flow_id
+        if "M1-contacts" not in pipeline_state["completedMilestones"]:
+            pipeline_state["completedMilestones"].append("M1-contacts")
+        pipeline_state["milestone"] = "M2-pitch-prompts"
+
     # ── 1e. LLM-generate pitch via test/connection ──────────
     test_conn_lang = language if language != "auto" else "en-us"
     if dry_run:
@@ -1385,6 +1542,12 @@ def _run_create_wizard(
         click.echo("  Prompts persisted via /save/prompt.")
     elif dry_run:
         click.echo("  [dry-run] would POST /api/v1/ai/workflow/save/prompt")
+
+    # ── M2 (pitch + email prompt templates) complete ────────
+    if pipeline_state is not None:
+        if "M2-pitch-prompts" not in pipeline_state["completedMilestones"]:
+            pipeline_state["completedMilestones"].append("M2-pitch-prompts")
+        pipeline_state["milestone"] = "M3-settings"
 
     # ── 3. Settings ─────────────────────────────────────────
     click.echo()
@@ -1549,11 +1712,29 @@ def _run_create_wizard(
                 code="AIFLOW_LAUNCH_FAILED",
             )
             click.echo("  Settings saved + flow launched.")
+            # ── M3 (mailbox + timeTemplate + meetingRouter +
+            #        /save/setting) complete ─────────────────────
+            # Only mark M3 done after /save/setting actually returned
+            # — that's the boundary the user defined as "AIFlow created
+            # successfully". The outer _run_create_wizard_safe consults
+            # this list to decide whether to suppress the failure banner.
+            if pipeline_state is not None:
+                if "M3-settings" not in pipeline_state["completedMilestones"]:
+                    pipeline_state["completedMilestones"].append("M3-settings")
     else:
-        click.echo(
-            "  Flow left as DRAFT (no save/setting call). Re-run with "
-            "--launch next time, or use `aiflow settings-update` to launch "
-            "this flow after editing."
+        # WARNING-grade message: this branch leaves the AIFlow in a NON-
+        # deliverable state (DRAFT, no sequenceId, no mailbox bound, no
+        # time template). Promote with yellow + WARNING: prefix so users
+        # and downstream scripts that grep stdout don't mistake the
+        # flowId line for "creation succeeded".
+        click.secho(
+            "  WARNING: flow left as DRAFT — /save/setting was NOT called. "
+            "The workflow has no sequenceId on the engage service, no bound "
+            "mailbox, and no time template; the scheduler cannot send any "
+            "emails until you complete creation. Re-run with --launch, or "
+            "run `aiflow settings-update <flowId> --enable-agent-reply` "
+            "to fire /save/setting on this flow.",
+            fg="yellow",
         )
 
     # ── Summary ─────────────────────────────────────────────
@@ -1565,6 +1746,38 @@ def _run_create_wizard(
         balance = client.get_token_balance()
     except Exception as e:  # noqa: BLE001
         click.echo(f"  Warning: token balance probe failed ({e})", err=True)
+
+    # creationComplete reflects the authoritative "is this a deliverable
+    # AIFlow now?" answer. Only true when ALL three milestones completed
+    # — most importantly M3 (/save/setting actually fired). Launch
+    # failures raise SystemExit upstream and never reach this line, so
+    # by the time we're here either save_setting succeeded or --no-launch
+    # was passed. Downstream scripts / agents should branch on
+    # creationComplete, not on flowId existence.
+    completed_milestones = (
+        list(pipeline_state["completedMilestones"])
+        if pipeline_state is not None
+        else []
+    )
+    creation_complete = (
+        "M3-settings" in completed_milestones and not dry_run
+    )
+    if creation_complete:
+        missing_steps = []
+        next_step = None
+    elif dry_run:
+        missing_steps = ["all-side-effects (dry-run)"]
+        next_step = "Re-run without --dry-run to actually create the AIFlow."
+    else:
+        # --no-launch path: every preceding step was persisted but
+        # /save/setting was deliberately skipped.
+        missing_steps = [
+            "save/setting (no sequenceId, no mailbox bound, no time template)"
+        ]
+        next_step = (
+            f"aiflow settings-update {flow_id} --enable-agent-reply  "
+            f"OR  re-run `aiflow create --launch ...`"
+        )
 
     summary = {
         "dryRun": dry_run,
@@ -1580,6 +1793,10 @@ def _run_create_wizard(
         "mailboxesSelected": len(sequence_list),
         "autoApprove": bool(auto_approve),
         "launched": bool(launch_now) and not dry_run,
+        "creationComplete": creation_complete,
+        "completedMilestones": completed_milestones,
+        "missing": missing_steps,
+        "nextStep": next_step,
         "meetingRouterId": meeting_router_id,
     }
     if balance is not None:
@@ -1600,10 +1817,11 @@ def _run_create_wizard(
         if launch_result is not None:
             emit(launch_result)
     else:
-        click.echo(
-            f"Saved as DRAFT (flowId={flow_id}). Activate later with "
-            "`aiflow settings-update {flow_id} --enable-agent-reply` "
-            "or re-run `aiflow create --launch`."
+        click.secho(
+            f"WARNING: flow {flow_id} is INCOMPLETE (DRAFT, no save/setting). "
+            f"Activate later with `aiflow settings-update {flow_id} "
+            "--enable-agent-reply` or re-run `aiflow create --launch`.",
+            fg="yellow",
         )
 
 
