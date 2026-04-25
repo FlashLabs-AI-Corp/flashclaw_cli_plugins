@@ -11,6 +11,79 @@ _(nothing yet)_
 
 ---
 
+## 0.4.0 — 2026-04-25
+
+**Breaking change.** `aiflow create --no-launch` is now FORBIDDEN.
+
+In 0.3.3 the `--no-launch` path was discouraged (yellow WARNING +
+`creationComplete: false` in the summary) but still allowed —
+agents and scripts kept reaching for it and ending up with orphan
+DRAFTs (workflow row exists but with no sequenceId on the engage
+service, no bound mailbox, no time template, no meetingRouteId; the
+scheduler cannot send anything against such a flow). 0.4.0 closes the
+hole entirely: the `--no-launch` flag is rejected at the entry of
+`aiflow create` with `AIFLOW_NO_LAUNCH_FORBIDDEN` (exit code 1), BEFORE
+any side-effect call (no CSV upload, no `create/list`, no pitch fetch,
+nothing). The flag-shape stays registered with Click only so the error
+is helpful instead of Click's generic "no such option".
+
+### Migration
+The error message and updated docs both point at the canonical
+replacement workflow:
+
+- **Goal: create a flow but don't send right now** —
+  `aiflow create ...` (always launches) then `aiflow pause FLOW_ID` to
+  flip ACTIVE → PAUSED. The flow is fully built (sequenceId, mailbox,
+  time template all bound) and the scheduler is held off. This is the
+  state `--no-launch` was trying to produce, but without leaving an
+  unbuilt orphan.
+
+- **Goal: edit prompts / settings before sending** —
+  `aiflow create ...` → `aiflow pause FLOW_ID` →
+  `aiflow prompt-update FLOW_ID --file ...` /
+  `aiflow settings-update FLOW_ID ...` →
+  `aiflow resume FLOW_ID` (PAUSED → ACTIVE).
+
+### Changed
+- `--launch/--no-launch` Click option help text rewritten: `--launch`
+  is documented as a no-op (default behaviour); `--no-launch` is
+  documented as FORBIDDEN with the migration recipe inline.
+- `SKILL.md` `aiflow create` description leads with "`--no-launch` is
+  FORBIDDEN" and the create → pause migration. The args list drops
+  `--launch/--no-launch`. Examples drop `--launch` (now redundant) and
+  add an `aiflow create ... && aiflow pause $FLOW_ID` example for the
+  build-but-don't-send case.
+- `README.md` options table flags `--launch` as a no-op and `--no-launch`
+  as FORBIDDEN with `AIFLOW_NO_LAUNCH_FORBIDDEN`. Pipeline section
+  drops the "(when `--launch`)" qualifier on step 8 — launch is always
+  mandatory now.
+
+### Tests
+- `test_no_launch_marks_creation_incomplete_with_next_step` (the
+  0.3.3 happy-path test for `--no-launch`) renamed to
+  `test_explicit_no_launch_is_rejected`. New assertions: exit code
+  != 0; output contains `AIFLOW_NO_LAUNCH_FORBIDDEN`; none of the
+  upload / create / save endpoints were called (the guard fires
+  before any network hit); migration message contains all of
+  `aiflow pause`, `aiflow prompt-update`, `aiflow settings-update`,
+  `aiflow resume`.
+- `test_default_create_triggers_regenerate_emails` no longer relies
+  on `--no-launch` to short-circuit the launch path — it now mocks
+  the full M3 set (`get_setting` / `list_time_templates` /
+  `list_personal_meetings` / `save_setting`) so the wizard runs end
+  to end.
+- 88 passing.
+
+### Not changed (deliberately)
+The interactive wizard's `Launch this AIFlow now? (No = save as
+draft)` confirm prompt is untouched in 0.4.0. It was authored before
+the milestone-based DoD was enforced, and answering "No" still ends
+up in the same orphan-DRAFT state `--no-launch` produced. This is
+known and tracked separately — the focus of 0.4.0 is sealing the
+flag-driven path that automation / agents take.
+
+---
+
 ## 0.3.3 — 2026-04-25
 
 Definition-of-done is now enforced and surfaced. `aiflow create` is

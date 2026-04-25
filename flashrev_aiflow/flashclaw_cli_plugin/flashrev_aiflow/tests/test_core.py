@@ -1167,52 +1167,43 @@ class TestCreateNoWizardV2(unittest.TestCase):
         self.assertIn('"missing": []', result.output)
         self.assertIn('"nextStep": null', result.output)
 
-    def test_no_launch_marks_creation_incomplete_with_next_step(self):
-        """The --no-launch escape hatch leaves the flow in a non-deliverable
-        state. The Summary JSON must reflect that with creationComplete=false
-        + a non-empty missing array + a nextStep recovery hint, so downstream
-        scripts and agents don't mistake the flowId for a working flow."""
-        self.client_stub.upload_contacts_csv.return_value = {
-            "code": 200, "data": {"listId": 1, "listName": "c.csv"},
-        }
-        self.client_stub.create_aiflow_from_list.return_value = {
-            "code": 200, "data": {"id": 999},
-        }
-        self.client_stub.test_website_connection.return_value = {
-            "code": 200, "data": {"officialDescription": "d"},
-        }
-        self.client_stub.save_pitch.return_value = {"code": 200}
-        self.client_stub.get_workflow_prompt.side_effect = [
-            [],
-            [
-                {"id": 10, "workflowStepId": 10, "step": 1,
-                 "delayMinutes": 60, "emailContent": "filled"},
-                {"id": 11, "workflowStepId": 11, "step": 2,
-                 "delayMinutes": 4320, "emailContent": "filled"},
-                {"id": 12, "workflowStepId": 12, "step": 3,
-                 "delayMinutes": 10080, "emailContent": "filled"},
-            ],
-        ]
-        self.client_stub.save_prompt.return_value = {"code": 200, "data": True}
+    def test_explicit_no_launch_is_rejected(self):
+        """`aiflow create --no-launch` is FORBIDDEN. The flag used to leave
+        orphan DRAFTs (no sequenceId, no bound mailbox, no time template);
+        the create wizard now rejects it before any side-effect call so
+        the user can never accidentally produce a non-deliverable flow.
 
+        The migration message tells users to fully build the flow then
+        pause it — `aiflow create` (always launches) + `aiflow pause`
+        produces the same "fully built, not currently sending" state
+        the user wanted, without leaving an unbuilt orphan.
+
+        Verifies: exit code != 0, AIFLOW_NO_LAUNCH_FORBIDDEN error code,
+        none of the upload / create / save endpoints were called, and
+        the error message points at create → pause as the canonical
+        recovery (plus prompt-update / settings-update for staged edits).
+        """
         result = self._invoke(
             "--no-wizard", "--csv", str(self.csv_path),
             "--url", "acme.com", "--language", "en-us",
             "--no-regenerate-emails",
-            "--no-launch",
+            "--no-launch",                 # the rejected flag
             "-y",
         )
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        # save_setting must NOT have been called on this branch.
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("AIFLOW_NO_LAUNCH_FORBIDDEN", result.output)
+        # The guard fires BEFORE any network call — none of the create
+        # pipeline endpoints should have been touched.
+        self.client_stub.upload_contacts_csv.assert_not_called()
+        self.client_stub.create_aiflow_from_list.assert_not_called()
         self.client_stub.save_setting.assert_not_called()
-        # Summary JSON: creation is NOT complete + caller is told what's
-        # missing + given a concrete recovery command.
-        self.assertIn('"creationComplete": false', result.output)
-        self.assertIn('"save/setting', result.output)
-        self.assertIn('aiflow settings-update', result.output)
-        # Yellow WARNING text in plain stdout (color codes stripped by
-        # CliRunner in some setups, so just check the keyword).
-        self.assertIn("WARNING", result.output)
+        # Migration hint must point at the create → pause workflow as
+        # the headline answer, plus prompt-update / settings-update /
+        # resume for staged edits.
+        self.assertIn("aiflow pause", result.output)
+        self.assertIn("aiflow prompt-update", result.output)
+        self.assertIn("aiflow settings-update", result.output)
+        self.assertIn("aiflow resume", result.output)
 
     def test_pipeline_failure_emits_aiflow_not_created_banner(self):
         """Any failure mid-pipeline must surface as a prominent banner,
@@ -1317,7 +1308,12 @@ class TestCreateNoWizardV2(unittest.TestCase):
         """The default --regenerate-emails=True path must hit
         /get/email/prompt per seeded step. We don't run a real network
         call here — just assert the wizard announces the regenerate
-        pass (proof the flag is default-on)."""
+        pass (proof the flag is default-on).
+
+        Note: --no-launch was previously used here to short-circuit the
+        launch path mocks. That flag is now FORBIDDEN, so we mock the
+        full launch path instead so the wizard can complete normally.
+        """
         self.client_stub.upload_contacts_csv.return_value = {
             "code": 200, "data": {"listId": 1, "listName": "c.csv"},
         }
@@ -1331,12 +1327,25 @@ class TestCreateNoWizardV2(unittest.TestCase):
         self.client_stub.get_workflow_prompt.return_value = []
         # Stub save_prompt so seed_default_steps can run without real HTTP.
         self.client_stub.save_prompt.return_value = {"code": 200}
+        # Launch-path stubs (M3): get/setting → time/template → meetings
+        # → save/setting. Without these the mandatory launch would fail.
+        self.client_stub.get_setting.return_value = {
+            "isShowAiReply": False, "autoApprove": False,
+            "agentPromptList": [],
+        }
+        self.client_stub.list_time_templates.return_value = {
+            "code": 200, "data": [{"id": 1, "name": "tpl",
+                                   "properties": {}, "timeBlocks": []}],
+        }
+        self.client_stub.list_personal_meetings.return_value = {
+            "code": 200, "data": [],
+        }
+        self.client_stub.save_setting.return_value = {"code": 200, "data": True}
 
-        # --no-launch so we don't need to mock /get/setting, meetings etc.
         result = self._invoke(
             "--no-wizard", "--csv", str(self.csv_path),
             "--url", "acme.com", "--language", "en-us",
-            "--no-launch",
+            "-y",
         )
         # Regardless of whether the LLM calls succeed on the stub, the
         # wizard should announce "Generating email prompt templates"

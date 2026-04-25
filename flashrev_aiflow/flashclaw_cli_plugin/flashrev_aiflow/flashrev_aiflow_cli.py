@@ -1111,16 +1111,20 @@ def aiflow_settings_update(
               help="Override agentStrategy in the /save/setting body. "
                    "Default: inherit whatever /get/setting returned.")
 @click.option("--launch/--no-launch", "launch_now", default=None,
-              help="Launch the AIFlow after save. Default ON in both "
-                   "interactive (prompted, defaults to yes) and --no-wizard "
-                   "modes — without launch, the flow stays DRAFT with no "
-                   "sequence bound on the engage service, no mailbox bound, "
-                   "no time template, and the scheduler has nothing to "
-                   "execute against. Pass --no-launch explicitly for a "
-                   "DRAFT-only run (e.g. you plan to populate prompts later "
-                   "via `aiflow prompt-update` before launching). Launch is "
-                   "blocked when any step's emailContent is empty (see "
-                   "--regenerate-emails, default on).")
+              help="Launch the AIFlow after save. **--launch is the enforced "
+                   "default** — `aiflow create` always fires /save/setting "
+                   "and transitions DRAFT → ACTIVE. **--no-launch is "
+                   "FORBIDDEN** (rejected with AIFLOW_NO_LAUNCH_FORBIDDEN); "
+                   "it used to leave orphan DRAFTs (no sequenceId, no bound "
+                   "mailbox, no time template) that the scheduler could not "
+                   "act on. If you want the flow created but NOT sending "
+                   "right now, run `aiflow create ...` (always launches) "
+                   "then `aiflow pause FLOW_ID` to flip ACTIVE → PAUSED — "
+                   "the flow is fully built and you can edit / resume / "
+                   "delete it from the PAUSED state. For staged edits "
+                   "before sending, the same pattern applies: create → "
+                   "pause → `aiflow prompt-update` / `aiflow settings-update` "
+                   "→ `aiflow resume`.")
 @click.option("-y", "--yes", is_flag=True,
               help="Skip the final confirmation prompt.")
 @click.option("--force", is_flag=True,
@@ -1159,6 +1163,35 @@ def aiflow_create(
         aiflow draft        # inspect
         aiflow delete <id>  # clean up
     """
+    # ── Hard reject --no-launch ─────────────────────────────
+    # `aiflow create` MUST fire /save/setting (DRAFT → ACTIVE). Click's
+    # boolean flag returns False ONLY when the user explicitly passed
+    # --no-launch (default is None, --launch sets True). Allowing
+    # --no-launch produced orphan DRAFTs without a sequenceId, mailbox
+    # binding, or time template — agents kept reaching for it and
+    # ending up with non-deliverable flows. We keep the flag-shape
+    # registered with Click so we can return a helpful error here
+    # instead of Click's generic "no such option".
+    if launch_now is False:
+        emit_error(
+            "--no-launch is FORBIDDEN. `aiflow create` MUST fire "
+            "/save/setting and transition the flow DRAFT → ACTIVE; "
+            "passing --no-launch would leave an orphan DRAFT with no "
+            "sequenceId, no bound mailbox, and no time template — the "
+            "scheduler cannot send anything against such a flow. "
+            "Migration: drop the --no-launch flag (the default already "
+            "launches). If your goal is 'create the flow but don't send "
+            "yet', run `aiflow create ...` (always launches) then "
+            "`aiflow pause FLOW_ID` — the flow is fully built and the "
+            "scheduler is paused, exactly the state --no-launch was "
+            "trying to produce, but without leaving an unbuilt orphan. "
+            "If you also need to edit prompts / settings before sending, "
+            "use create → pause → `aiflow prompt-update FLOW_ID --file "
+            "...` / `aiflow settings-update FLOW_ID ...` → "
+            "`aiflow resume FLOW_ID`.",
+            code="AIFLOW_NO_LAUNCH_FORBIDDEN",
+        )
+
     _require_api_key()
     client = _build_client()
     _run_create_wizard_safe(

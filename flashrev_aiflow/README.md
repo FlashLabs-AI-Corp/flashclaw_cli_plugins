@@ -223,7 +223,8 @@ flashclaw-cli-plugin-flashrev-aiflow aiflow create --no-wizard \
 | `--country-column` | Required when `--language=auto`; pass `none` to skip |
 | `--mailboxes` | Optional (default `all-active`) |
 | `--regenerate-emails` / `--no-regenerate-emails` | Optional (default: ON — LLM-fills every step's emailContent) |
-| `--launch` / `--no-launch` | Optional (default: ON — fires `/save/setting`, transitions DRAFT → ACTIVE, binds sequence + mailbox + time template). Pass `--no-launch` only when you intend to populate prompts later via `aiflow prompt-update`. |
+| `--launch` | Optional and now a no-op — `aiflow create` ALWAYS launches (fires `/save/setting`, transitions DRAFT → ACTIVE, binds sequence + mailbox + time template). Kept only as a documentation flag. |
+| `--no-launch` | **FORBIDDEN** — passing it returns `AIFLOW_NO_LAUNCH_FORBIDDEN` (exit 1) before any side-effect call. The flag previously left orphan DRAFTs (no sequenceId, no bound mailbox, no time template). To create a flow without sending right now, run `aiflow create ...` (always launches) then `aiflow pause FLOW_ID`. |
 
 **Launch-time completeness gate**
 
@@ -257,13 +258,14 @@ Every `aiflow create` flows through auth-gateway-svc with the `/flashrev` prefix
    — default on (`--regenerate-emails=True`); fills the emailContent prompt
    template so the scheduler has something to feed into the LLM at send time.
 7. `POST /api/v1/ai/workflow/save/prompt`       persist the step prompts
-8. *(when `--launch`)*
+8. *(always — launch is mandatory)*
    - `GET  /api/v1/ai/workflow/get/setting/{flowId}`  -> `agentPromptList`, `emailTrack`, defaults
    - `GET  /engage/api/v1/time/template/list`         -> pick `timeTemplateConfig`
    - `POST /meeting-svc/api/v1/meeting/personal/list` -> first `id` -> Book Meeting `meetingRouteId`
    - `POST /api/v1/ai/workflow/save/setting`          persist settings + DRAFT -> ACTIVE
 
-`--no-launch` stops after step 7; the flow stays DRAFT.
+`--no-launch` is FORBIDDEN. To create a flow without immediately sending,
+run `aiflow create ...` then `aiflow pause FLOW_ID`.
 
 **Exit codes** for create:
 
