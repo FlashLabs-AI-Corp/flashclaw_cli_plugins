@@ -11,6 +11,28 @@ _(nothing yet)_
 
 ---
 
+## 0.3.1 — 2026-04-24
+
+### Fixed
+- `aiflow create --no-wizard` now defaults to launching the flow
+  (`launch_now=True`), so `/api/v1/ai/workflow/save/setting` is fired as
+  part of every create. Previously the `--no-wizard` branch defaulted to
+  `launch_now=False`, which produced flows without a sequence binding on
+  the engage service, no mailbox bound, no time template, and no way for
+  the scheduler to actually send emails — even though every other step
+  in the create pipeline (pitch / prompts / step seed / regenerate) ran
+  normally. Mirrors the frontend's "Launch AIFlow" button being the
+  natural endpoint of the create wizard. Pass `--no-launch` explicitly
+  when you intend to populate prompts later via `aiflow prompt-update`
+  before launching.
+
+### Tests
+- Added `test_default_create_triggers_save_setting` pinning the new
+  default-on launch behaviour for the headless `--no-wizard` path
+  (85 passing, was 84).
+
+---
+
 ## 0.3.0 — 2026-04-24
 
 Major rewrite to match the real `search-website` frontend flow: pitch
