@@ -740,6 +740,51 @@ class TestWizardV2Helpers(unittest.TestCase):
             "hello world",
         )
 
+    def test_truncate_to_byte_limit_is_noop_under_limit(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        text = "hello world"
+        self.assertEqual(wizard._truncate_to_byte_limit(text), text)
+
+    def test_truncate_to_byte_limit_clips_over_limit_ascii(self):
+        """ASCII = 1 byte/char; verify the cap kicks in at the byte
+        threshold (43,690 bytes by default)."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        # 50 KB of ASCII chars = 50_000 bytes, well over the 43_690 cap.
+        long_text = "a" * 50_000
+        out = wizard._truncate_to_byte_limit(long_text)
+        self.assertEqual(len(out.encode("utf-8")),
+                         wizard._EMAIL_CONTENT_BYTE_LIMIT)
+
+    def test_truncate_to_byte_limit_explicit_max_bytes(self):
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        out = wizard._truncate_to_byte_limit("abcdef", max_bytes=3)
+        self.assertEqual(out, "abc")
+
+    def test_truncate_to_byte_limit_safe_on_multibyte_boundary(self):
+        """A truncation boundary that splits a multi-byte UTF-8 char must
+        not produce invalid bytes (use errors='ignore' on decode)."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        # "中" is 3 bytes in utf-8. Cap at 4 bytes — first char fits (3),
+        # second's leading byte (1 of 3) must be dropped.
+        out = wizard._truncate_to_byte_limit("中中中", max_bytes=4)
+        self.assertEqual(out, "中")
+        # Ensure the result is valid utf-8 with no replacement chars.
+        out.encode("utf-8")  # must not raise
+
+    def test_build_save_prompt_body_caps_emailContent(self):
+        """User-supplied (or LLM-generated) emailContent is truncated to
+        the TEXT column limit when building the /save/prompt body."""
+        from flashclaw_cli_plugin.flashrev_aiflow import wizard
+        oversized = "x" * (wizard._EMAIL_CONTENT_BYTE_LIMIT + 5_000)
+        body = wizard.build_save_prompt_body(1, [
+            {"workflowStepId": 1, "step": 1, "delayMinutes": 60,
+             "emailContent": oversized},
+        ])
+        self.assertEqual(
+            len(body["prompts"][0]["emailContent"].encode("utf-8")),
+            wizard._EMAIL_CONTENT_BYTE_LIMIT,
+        )
+
     def test_parse_sse_content_strips_trailing_terminator(self):
         """Backend emits ``</content>`` as the stream close marker — the
         parser must strip it so callers get a clean prompt template."""

@@ -540,6 +540,34 @@ def build_save_pitch_body(
 _DEFAULT_DELAY_MINUTES = [60, 4320, 10080]  # 1h, 3d, 7d
 
 
+# t_ai_workflow_prompt.email_content is a MySQL TEXT column (65,535 bytes
+# hard cap). Cap CLI-supplied content at 2/3 of that to leave headroom for
+# any later edits / extensions and to avoid the silent BatchUpdateException
+# truncation we observed when long LLM templates pushed past the limit.
+# Counts BYTES (not chars) because TEXT's limit is byte-based and any
+# non-ASCII char in the prompt expands to 2-4 utf-8 bytes.
+_TEXT_COLUMN_HARD_CAP_BYTES = 65_535
+_EMAIL_CONTENT_BYTE_LIMIT = _TEXT_COLUMN_HARD_CAP_BYTES * 2 // 3  # 43,690
+
+
+def _truncate_to_byte_limit(
+    text: str, max_bytes: int = _EMAIL_CONTENT_BYTE_LIMIT,
+) -> str:
+    """Return ``text`` clipped so its UTF-8 representation fits within
+    ``max_bytes``. A no-op when the text is already short enough.
+
+    Truncation drops any partial multi-byte character at the cut point
+    via ``decode("utf-8", errors="ignore")`` so the result is always
+    valid UTF-8.
+    """
+    if text is None:
+        return text
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def extract_prompt_steps(get_prompt_response: dict) -> list[dict]:
     """Normalise the `/get/prompt` response into a flat list of step dicts.
 
@@ -599,15 +627,26 @@ def build_save_prompt_body(
         delay = s.get("delayMinutes")
         if delay is None:
             delay = _DEFAULT_DELAY_MINUTES[i] if i < len(_DEFAULT_DELAY_MINUTES) else 10080
+        # Defensive cap on every string field that maps to a TEXT column
+        # in t_ai_workflow_prompt — protects user-supplied content from
+        # `aiflow prompt-update --file` as well as the regenerate path.
         prompts.append({
             "workflowStepId": step_id,
             "step": s.get("step") or (i + 1),
             "stepType": s.get("stepType") or "email",
             "delayMinutes": delay,
-            "emailSubject": s.get("emailSubject") or "",
-            "emailContent": s.get("emailContent") or "",
-            "subject": s.get("subject") or s.get("exampleSubject") or "",
-            "content": s.get("content") or s.get("exampleContent") or "",
+            "emailSubject": _truncate_to_byte_limit(
+                s.get("emailSubject") or ""
+            ),
+            "emailContent": _truncate_to_byte_limit(
+                s.get("emailContent") or ""
+            ),
+            "subject": _truncate_to_byte_limit(
+                s.get("subject") or s.get("exampleSubject") or ""
+            ),
+            "content": _truncate_to_byte_limit(
+                s.get("content") or s.get("exampleContent") or ""
+            ),
         })
     return {"workflowId": workflow_id, "prompts": prompts}
 
@@ -760,6 +799,22 @@ def regenerate_step_content(
                 resp.raise_for_status()
                 prompt_text = _parse_sse_content(resp.text)
                 if prompt_text:
+                    # Cap to the t_ai_workflow_prompt.email_content TEXT
+                    # column ceiling (with headroom). Without this, long
+                    # LLM templates trigger MySQL "Data truncation: Data
+                    # too long for column 'email_content'" — backend
+                    # returns it as HTTP 200 + body code 400, which is
+                    # easy to miss in the wizard log.
+                    original_len = len(prompt_text.encode("utf-8"))
+                    prompt_text = _truncate_to_byte_limit(prompt_text)
+                    if len(prompt_text.encode("utf-8")) < original_len:
+                        click.echo(
+                            f"  ~ step {step_label}: emailContent truncated "
+                            f"from {original_len} to "
+                            f"{len(prompt_text.encode('utf-8'))} bytes "
+                            f"to fit MySQL TEXT column limit.",
+                            err=True,
+                        )
                     break
                 # Empty response — treat as failure and retry.
                 last_err = "empty SSE stream"
