@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashclaw-cli-plugin-flashrev-aiflow"
-version = "0.3.2"
+version = "0.3.3"
 description = "Agent-friendly CLI for FlashRev AIFlow — email outreach automation, routed via auth-gateway-svc."
 requires-python = ">=3.10"
 dependencies = [
